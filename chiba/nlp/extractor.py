@@ -1,0 +1,55 @@
+import re
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Entities:
+    intent: str = ""
+    query: str = ""
+    amount: float | None = None
+    target_node: str | None = None
+    item: str | None = None
+    raw: str = ""
+
+
+def extract(intent: str, text: str) -> Entities:
+    text = text.strip()
+    e = Entities(intent=intent, raw=text)
+
+    if intent == "send_payment":
+        m = re.search(r'\$?(\d+(?:\.\d{1,2})?)', text)
+        if m:
+            e.amount = float(m.group(1))
+        m = re.search(r'\bto\s+(\w+)', text, re.IGNORECASE)
+        if m:
+            e.target_node = m.group(1)
+
+    elif intent == "query_wiki":
+        m = re.search(
+            r'(?:about|lookup|look up|what is|what are|tell me about|'
+            r'search for|find|define|explain|wiki)\s+(.+)',
+            text, re.IGNORECASE
+        )
+        if m:
+            e.query = m.group(1).strip()
+        elif len(text.split()) <= 3:
+            e.query = text
+        else:
+            e.query = text
+
+    elif intent == "buy_item":
+        m = re.search(r'(?:buy|purchase|order|take)\s+(.+)', text, re.IGNORECASE)
+        if m:
+            e.item = m.group(1).strip()
+        else:
+            e.item = text
+
+    elif intent == "ping_node":
+        m = re.search(r'(?:ping|reach|check)\s+(!?\w+)', text, re.IGNORECASE)
+        if m:
+            e.target_node = m.group(1)
+
+    else:
+        e.query = text
+
+    return e

@@ -1,0 +1,66 @@
+from dataclasses import dataclass, field
+from pathlib import Path
+import yaml
+
+
+@dataclass
+class MQTTConfig:
+    broker: str = "localhost"
+    port: int = 1883
+    topic_rx: str = "msh/test/rx"
+    topic_tx: str = "msh/test/tx"
+
+
+@dataclass
+class BLEConfig:
+    enabled: bool = False
+    device_name: str = ""
+
+
+@dataclass
+class MeshConfig:
+    cooldown_seconds: int = 15
+    heartbeat_interval_seconds: int = 86400
+    heartbeat_jitter_seconds: int = 600
+    reply_timeout_seconds: int = 30
+
+
+@dataclass
+class NLPConfig:
+    confidence_threshold: float = 0.65
+    embeddings_path: str = "embeddings/intent_matrix.npz"
+
+
+@dataclass
+class Config:
+    node_id: str = "!000000"
+    node_handle: str = "chiba"
+    mqtt: MQTTConfig = field(default_factory=MQTTConfig)
+    ble: BLEConfig = field(default_factory=BLEConfig)
+    mesh: MeshConfig = field(default_factory=MeshConfig)
+    nlp: NLPConfig = field(default_factory=NLPConfig)
+    db_path: str = "chiba.db"
+    payments_wallet_path: str = "wallet.json"
+
+
+def load_config(path: str = "config.yaml") -> Config:
+    if not Path(path).exists():
+        return Config()
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+
+    mqtt = MQTTConfig(**data.get("mqtt", {}))
+    ble = BLEConfig(**data.get("ble", {}))
+    mesh = MeshConfig(**data.get("mesh", {}))
+    nlp = NLPConfig(**data.get("nlp", {}))
+
+    return Config(
+        node_id=data.get("node_id", "!000000"),
+        node_handle=data.get("node_handle", "chiba"),
+        mqtt=mqtt,
+        ble=ble,
+        mesh=mesh,
+        nlp=nlp,
+        db_path=data.get("db", {}).get("path", "chiba.db"),
+        payments_wallet_path=data.get("payments", {}).get("wallet_path", "wallet.json"),
+    )

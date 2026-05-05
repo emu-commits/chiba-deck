@@ -1,0 +1,28 @@
+node_id: "!000000"
+node_handle: "chiba"
+
+mqtt:
+  broker: "localhost"
+  port: 1883
+  topic_rx: "msh/test/rx"
+  topic_tx: "msh/test/tx"
+
+ble:
+  enabled: false
+  device_name: ""
+
+mesh:
+  cooldown_seconds: 15
+  heartbeat_interval_seconds: 86400
+  heartbeat_jitter_seconds: 600
+  reply_timeout_seconds: 30
+
+nlp:
+  confidence_threshold: 0.65
+  embeddings_path: "embeddings/intent_matrix.npz"
+
+db:
+  path: "chiba.db"
+
+payments:
+  wallet_path: "wallet.json"

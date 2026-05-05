@@ -2,6 +2,9 @@
 mesh-client-design.md
 mesh-payment-system-design.pdf
 
+# Runtime config (copy from config.example.yaml)
+config.yaml
+
 # Python
 __pycache__/
 *.py[cod]
@@ -16,7 +19,9 @@ venv/
 *.sqlite
 *.sqlite3
 data/
-embeddings/
+
+# Runtime logs
+chiba.log
 
 # Keys / secrets
 *.key
