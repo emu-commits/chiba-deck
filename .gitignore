@@ -1,6 +1,8 @@
-# Design docs — kept local only, not for public repo
+# Design docs and planning docs — kept local only, not for public repo
 mesh-client-design.md
 mesh-payment-system-design.pdf
+CLAUDE.md
+chiba-ultraplan.md
 
 # Runtime config (copy from config.example.yaml)
 config.yaml

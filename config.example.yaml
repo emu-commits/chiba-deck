@@ -2,7 +2,7 @@ node_id: "!000000"
 node_handle: "chiba"
 
 mqtt:
-  broker: "localhost"
+  broker: "192.168.1.179"
   port: 1883
   topic_rx: "msh/test/rx"
   topic_tx: "msh/test/tx"
