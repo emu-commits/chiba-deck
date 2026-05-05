@@ -1,0 +1,31 @@
+# Design docs — kept local only, not for public repo
+mesh-client-design.md
+mesh-payment-system-design.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Data / runtime
+*.db
+*.sqlite
+*.sqlite3
+data/
+embeddings/
+
+# Keys / secrets
+*.key
+*.pem
+*.env
+.env*
+proving_key/
+toxic_waste/
+
+# OS
+.DS_Store
+Thumbs.db
