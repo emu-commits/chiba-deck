@@ -101,7 +101,7 @@ class Router:
         except Exception as e:
             log.error(f"plugin {cmd} error: {e}")
 
-    async def handle_user_input(self, text: str) -> str:
+    async def handle_user_input(self, text: str, force: bool = False) -> str:
         text = text.strip()
         if not text:
             return ""
@@ -116,7 +116,7 @@ class Router:
         entities = extract(intent, text)
 
         threshold = getattr(self._classifier, "threshold", self._cfg.nlp.confidence_threshold)
-        if confidence < threshold:
+        if not force and confidence < threshold:
             cmd = _INTENT_TO_CMD.get(intent, intent)
             return (
                 f"[?] Understood as: {intent} → ?{cmd} "

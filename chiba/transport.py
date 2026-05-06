@@ -21,19 +21,21 @@ class MQTTTransport:
         self._connected = False
         self._cooldowns: dict[str, float] = {}
 
-    def _on_connect(self, client, userdata, flags_or_connflags, rc_or_reason, *args):
-        # Handle both paho v1 (rc int) and v2 (ReasonCode object) callback signatures
+    def _on_connect(self, client, userdata, *args):
+        # paho v1: args = (flags_dict, rc_int)
+        # paho v2: args = (connect_flags, reason_code, properties)
+        rc = args[1] if len(args) >= 2 else (args[0] if args else 0)
         try:
-            success = rc_or_reason == 0 or not rc_or_reason.is_failure
+            rc_value = rc.value  # paho v2 ReasonCode
         except AttributeError:
-            success = rc_or_reason == 0
+            rc_value = int(rc)   # paho v1 integer
 
-        if success:
+        if rc_value == 0:
             self._connected = True
             client.subscribe(self._cfg.mqtt.topic_rx)
             log.info(f"MQTT connected → {self._cfg.mqtt.topic_rx}")
         else:
-            log.error(f"MQTT connect failed: {rc_or_reason}")
+            log.error(f"MQTT connect failed rc={rc_value}")
 
     def _on_message(self, client, userdata, msg):
         try:

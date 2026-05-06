@@ -44,10 +44,13 @@ class Config:
 
 
 def load_config(path: str = "config.yaml") -> Config:
-    if not Path(path).exists():
+    for candidate in [path, "config.example.yaml"]:
+        if Path(candidate).exists():
+            with open(candidate) as f:
+                data = yaml.safe_load(f) or {}
+            break
+    else:
         return Config()
-    with open(path) as f:
-        data = yaml.safe_load(f) or {}
 
     mqtt = MQTTConfig(**data.get("mqtt", {}))
     ble = BLEConfig(**data.get("ble", {}))

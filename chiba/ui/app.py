@@ -95,6 +95,8 @@ class ChibaApp(App):
         except Exception:
             pass
 
+    _QUIT_CMDS = {"quit", "exit", "q", "?quit", "/quit", ":q"}
+
     async def on_input_submitted(self, event: Input.Submitted):
         text = event.value.strip()
         if not text:
@@ -104,6 +106,10 @@ class ChibaApp(App):
         stream = self.query_one("#stream", StreamPanel)
         input_w.value = ""
 
+        if text.lower() in self._QUIT_CMDS:
+            self.exit()
+            return
+
         stream.write_input_echo(text)
 
         if self._pending_confirmation is not None:
@@ -111,7 +117,7 @@ class ChibaApp(App):
             self._pending_confirmation = None
             if text.lower() in ("y", "yes"):
                 self.run_worker(
-                    self._process(orig, stream, confirmed=True),
+                    self._process(orig, stream, force=True),
                     exclusive=False,
                 )
             else:
@@ -120,12 +126,12 @@ class ChibaApp(App):
 
         self.run_worker(self._process(text, stream), exclusive=False)
 
-    async def _process(self, text: str, stream: StreamPanel, confirmed: bool = False):
+    async def _process(self, text: str, stream: StreamPanel, force: bool = False):
         try:
-            reply = await self._router.handle_user_input(text)
+            reply = await self._router.handle_user_input(text, force=force)
             if not reply:
                 return
-            if reply.startswith("[?]") and not confirmed:
+            if reply.startswith("[?]"):
                 self._pending_confirmation = text
             stream.write_reply(reply)
         except Exception as e:
