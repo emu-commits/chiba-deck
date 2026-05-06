@@ -150,7 +150,15 @@ class Router:
                 return "not connected — can't send"
             self._transport.send_broadcast(query)
             self._db.insert_message(self._node_id, "", query, "out")
-            return f"→ mesh: {query}"
+            handle = self._db.get_node_handle(self._node_id) or self._cfg.node_handle
+            if self._display_cb:
+                self._display_cb(Event(
+                    type=EventType.MESSAGE,
+                    from_node=self._node_id,
+                    payload=query,
+                    meta={"from_handle": handle} if handle else {},
+                ))
+            return ""
 
         plugin = self._registry.get_local(cmd)
         if plugin:
