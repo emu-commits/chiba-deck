@@ -14,9 +14,9 @@ class HelpPlugin(Plugin):
 
     def handle(self, query: str, from_node: str | None = None) -> str:
         if not self._registry:
-            return "?nodes ?help ?status | chiba-deck v0.1"
+            return "?say <msg> ?nodes ?help ?status | chiba-deck v0.1"
         items = self._registry.describe_all()
         local_cmds = [f"?{i['cmd']}" for i in items if i.get("local")]
         remote_cmds = [f"?{i['cmd']}(@{i.get('node_id','?')})" for i in items if not i.get("local")]
-        all_cmds = local_cmds + remote_cmds
+        all_cmds = ["?say <message>"] + local_cmds + remote_cmds
         return " ".join(all_cmds) + " | chiba-deck v0.1"

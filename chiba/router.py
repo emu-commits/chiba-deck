@@ -23,6 +23,7 @@ _INTENT_TO_CMD: dict[str, str] = {
     "get_help": "help",
     "show_status": "status",
     "open_config": "__config__",
+    "send_chat": "say",
 }
 
 
@@ -142,6 +143,15 @@ class Router:
         return await self._dispatch_intent(intent, entities, text)
 
     async def _dispatch_cmd(self, cmd: str, query: str, raw: str) -> str:
+        if cmd in ("say", "chat", "broadcast", "s"):
+            if not query:
+                return "usage: ?say <message>"
+            if not self._transport or not self._transport.connected:
+                return "not connected — can't send"
+            self._transport.send_broadcast(query)
+            self._db.insert_message(self._node_id, "", query, "out")
+            return f"→ mesh: {query}"
+
         plugin = self._registry.get_local(cmd)
         if plugin:
             try:
