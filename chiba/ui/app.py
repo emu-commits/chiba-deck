@@ -56,12 +56,13 @@ class ChibaApp(App):
 
     TITLE = "CHIBA DECK"
 
-    def __init__(self, router, display_queue: EventQueue, db, config, **kwargs):
+    def __init__(self, router, display_queue: EventQueue, db, config, transport=None, **kwargs):
         super().__init__(**kwargs)
         self._router = router
         self._display_queue = display_queue
         self._db = db
         self._cfg = config
+        self._transport = transport
         self._pending_confirmation: str | None = None
 
     def compose(self) -> ComposeResult:
@@ -91,7 +92,7 @@ class ChibaApp(App):
             bar = self.query_one("#statusbar", StatusBar)
             bar.node_count = self._db.get_node_count()
             bar.unread = self._db.get_unread_count()
-            bar.connected = True
+            bar.connected = self._transport.connected if self._transport else False
         except Exception:
             pass
 

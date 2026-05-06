@@ -11,6 +11,9 @@ from .events import Event, EventQueue, EventType
 log = logging.getLogger(__name__)
 
 
+RETRY_DELAY = 15  # seconds between reconnect attempts
+
+
 class MQTTTransport:
     def __init__(self, config, node_id: str, event_queue: EventQueue):
         self._cfg = config
@@ -20,6 +23,15 @@ class MQTTTransport:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._connected = False
         self._cooldowns: dict[str, float] = {}
+        self._status_cb = None  # callable(str) — fed into stream panel
+
+    def set_status_cb(self, cb):
+        self._status_cb = cb
+
+    def _emit(self, msg: str):
+        log.info(f"MQTT: {msg}")
+        if self._status_cb and self._loop and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._status_cb, msg)
 
     def _on_connect(self, client, userdata, *args):
         # paho v1: args = (flags_dict, rc_int)
@@ -33,9 +45,13 @@ class MQTTTransport:
         if rc_value == 0:
             self._connected = True
             client.subscribe(self._cfg.mqtt.topic_rx)
-            log.info(f"MQTT connected → {self._cfg.mqtt.topic_rx}")
+            self._emit(f"connected ✓  broker={self._cfg.mqtt.broker}:{self._cfg.mqtt.port}  topic={self._cfg.mqtt.topic_rx}")
         else:
-            log.error(f"MQTT connect failed rc={rc_value}")
+            self._emit(f"broker refused connection (rc={rc_value})")
+
+    def _on_disconnect(self, client, userdata, *args):
+        self._connected = False
+        self._emit(f"disconnected from {self._cfg.mqtt.broker} — will retry in {RETRY_DELAY}s")
 
     def _on_message(self, client, userdata, msg):
         try:
@@ -71,28 +87,71 @@ class MQTTTransport:
             payload=payload,
         )
 
-    async def connect(self):
-        self._loop = asyncio.get_event_loop()
+    def _make_client(self):
         try:
-            self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         except AttributeError:
-            # paho < 2.0 fallback
-            self._client = mqtt.Client()
+            client = mqtt.Client()
+        client.on_connect = self._on_connect
+        client.on_disconnect = self._on_disconnect
+        client.on_message = self._on_message
+        return client
 
-        self._client.on_connect = self._on_connect
-        self._client.on_message = self._on_message
+    async def connect_loop(self):
+        """Background task: connect and auto-reconnect forever."""
+        self._loop = asyncio.get_event_loop()
+        broker = self._cfg.mqtt.broker
+        port = self._cfg.mqtt.port
 
-        try:
-            self._client.connect(self._cfg.mqtt.broker, self._cfg.mqtt.port, keepalive=60)
-            self._client.loop_start()
-            for _ in range(20):
-                if self._connected:
-                    break
-                await asyncio.sleep(0.25)
-            if not self._connected:
-                log.warning("MQTT not connected — running in offline mode")
-        except Exception as e:
-            log.warning(f"MQTT unavailable: {e} — offline mode")
+        while True:
+            self._emit(f"connecting to {broker}:{port} ...")
+            try:
+                if self._client is None:
+                    self._client = self._make_client()
+
+                self._client.connect(broker, port, keepalive=60)
+                self._client.loop_start()
+
+                # Wait up to 8 seconds for on_connect to fire
+                for _ in range(32):
+                    if self._connected:
+                        break
+                    await asyncio.sleep(0.25)
+
+                if not self._connected:
+                    self._emit(
+                        f"timeout — no response from {broker}:{port} after 8s  "
+                        f"(is mosquitto running? is the Pi reachable?)"
+                    )
+                    self._client.loop_stop()
+                    self._client = None
+                    await asyncio.sleep(RETRY_DELAY)
+                    continue
+
+                # Stay connected — poll until drop
+                while self._connected:
+                    await asyncio.sleep(2)
+
+                # on_disconnect already emitted the message
+                self._client.loop_stop()
+                self._client = None
+                await asyncio.sleep(RETRY_DELAY)
+
+            except asyncio.CancelledError:
+                break
+            except OSError as e:
+                self._emit(f"network error: {e}  (retrying in {RETRY_DELAY}s)")
+                if self._client:
+                    try:
+                        self._client.loop_stop()
+                    except Exception:
+                        pass
+                    self._client = None
+                await asyncio.sleep(RETRY_DELAY)
+            except Exception as e:
+                self._emit(f"unexpected error: {e}  (retrying in {RETRY_DELAY}s)")
+                self._client = None
+                await asyncio.sleep(RETRY_DELAY)
 
     def send_dm(self, to_node: str, text: str) -> bool:
         if not self._connected or not self._client:

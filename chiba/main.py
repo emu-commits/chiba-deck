@@ -87,11 +87,17 @@ async def _main():
         node_handle=config.node_handle,
     )
 
-    await transport.connect()
+    # Route MQTT status messages into the stream panel as SYS events
+    def _mqtt_status(msg: str):
+        display_eq.put_nowait(Event(type=EventType.SYSTEM, payload=f"MQTT: {msg}"))
 
-    # Emit startup system event
-    startup = Event(type=EventType.SYSTEM, payload=f"chiba-deck v0.1 | node {config.node_id} | ?help for commands")
-    display_eq.put_nowait(startup)
+    transport.set_status_cb(_mqtt_status)
+
+    # Startup banner
+    display_eq.put_nowait(Event(
+        type=EventType.SYSTEM,
+        payload=f"chiba-deck v0.1 | node {config.node_id} | ?help for commands",
+    ))
 
     async def event_processor():
         while True:
@@ -108,11 +114,13 @@ async def _main():
         display_queue=display_eq,
         db=db,
         config=config,
+        transport=transport,
     )
 
     tasks = [
         asyncio.create_task(event_processor(), name="event-processor"),
         asyncio.create_task(heartbeat.run(), name="heartbeat"),
+        asyncio.create_task(transport.connect_loop(), name="mqtt-connect"),
     ]
 
     try:
