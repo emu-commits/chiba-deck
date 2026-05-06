@@ -47,6 +47,18 @@ class MQTTTransport:
         if self._status_cb and self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._status_cb, msg)
 
+    def _nodes_topic(self) -> str | None:
+        """Derive the norns nodes-list topic from topic_rx, or None if not applicable."""
+        rx = self._cfg.mqtt.topic_rx
+        candidate = rx.replace("/rx", "/nodes")
+        return candidate if candidate != rx else None
+
+    def _subscribe_topics(self, client):
+        client.subscribe(self._cfg.mqtt.topic_rx)
+        nt = self._nodes_topic()
+        if nt:
+            client.subscribe(nt)
+
     def _on_connect(self, client, userdata, *args):
         # paho v1: args = (flags_dict, rc_int)
         # paho v2: args = (connect_flags, reason_code, properties)
@@ -58,7 +70,7 @@ class MQTTTransport:
 
         if rc_value == 0:
             self._connected = True
-            client.subscribe(self._cfg.mqtt.topic_rx)
+            self._subscribe_topics(client)
             self._emit(f"connected ✓  broker={self._cfg.mqtt.broker}:{self._cfg.mqtt.port}  topic={self._cfg.mqtt.topic_rx}")
         else:
             self._emit(f"broker refused connection (rc={rc_value})")
@@ -71,6 +83,24 @@ class MQTTTransport:
         try:
             text = msg.payload.decode()
             data = json.loads(text)
+
+            # Nodes-list topic: bulk import all known nodes silently
+            nt = self._nodes_topic()
+            if nt and msg.topic == nt and isinstance(data, list):
+                for node in data:
+                    node_id = _node_id_str(node.get("id", ""))
+                    if not node_id:
+                        continue
+                    event = Event(
+                        type=EventType.HEARTBEAT,
+                        from_node=node_id,
+                        payload=node.get("longName", node_id),
+                        meta={"handle": node.get("longName", ""), "caps": [], "silent": True},
+                    )
+                    if self._loop and not self._loop.is_closed():
+                        self._loop.call_soon_threadsafe(self._eq.put_nowait, event)
+                return
+
             event = self._parse(data)
             if event and self._loop and not self._loop.is_closed():
                 self._loop.call_soon_threadsafe(self._eq.put_nowait, event)
@@ -78,15 +108,22 @@ class MQTTTransport:
             log.debug(f"transport parse error: {e}")
 
     def _parse(self, data: dict) -> Event | None:
-        from_node = _node_id_str(data.get("from", ""))
+        raw_from = data.get("from") if data.get("from") else data.get("sender", "")
+        from_node = _node_id_str(raw_from)
         to_node = _node_id_str(data.get("to", ""))
-        payload = data.get("payload", data.get("text", ""))
+        msg_type = data.get("type", "")
 
-        # Meshtastic nodeinfo packets carry a dict payload with longName/shortName
-        if isinstance(payload, dict):
-            long_name = payload.get("longName", payload.get("long_name", ""))
-            short_name = payload.get("shortName", payload.get("short_name", ""))
-            handle = long_name or short_name
+        # Pi bridge longName field (added by our bridge patch)
+        name = data.get("name", "")
+
+        # Standard Meshtastic JSON nodeinfo packet
+        if msg_type == "nodeinfo":
+            pl = data.get("payload", {})
+            if isinstance(pl, dict):
+                handle = (pl.get("longname") or pl.get("longName") or
+                          pl.get("shortname") or pl.get("shortName") or "")
+            else:
+                handle = name
             if not from_node:
                 return None
             return Event(
@@ -96,10 +133,19 @@ class MQTTTransport:
                 meta={"handle": handle, "caps": []},
             )
 
+        # Ignore other standard Meshtastic packet types
+        if msg_type in ("position", "telemetry", "waypoint", "routing", "admin"):
+            return None
+
+        # Resolve text: Pi bridge uses top-level "text"; standard JSON uses payload.text
+        payload = data.get("payload", data.get("text", ""))
+        if isinstance(payload, dict):
+            payload = payload.get("text", "")
+
         if not payload:
             return None
 
-        if payload.startswith(">:"):
+        if isinstance(payload, str) and payload.startswith(">:"):
             caps = re.findall(r'\?(\w+)', payload.split("|")[0])
             return Event(
                 type=EventType.HEARTBEAT,
@@ -112,7 +158,8 @@ class MQTTTransport:
             type=EventType.MESSAGE,
             from_node=from_node,
             to_node=to_node,
-            payload=payload,
+            payload=str(payload),
+            meta={"from_handle": name} if name else {},
         )
 
     def _make_client(self):
@@ -215,8 +262,7 @@ class MQTTTransport:
         await asyncio.sleep(timeout)
         self._client.on_message = orig
         self._client.unsubscribe("msh/#")
-        # Re-ensure we're on our configured topic
-        self._client.subscribe(self._cfg.mqtt.topic_rx)
+        self._subscribe_topics(self._client)
         return sorted(found)
 
     def update_topics(self, topic_rx: str, topic_tx: str):

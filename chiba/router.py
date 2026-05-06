@@ -58,7 +58,10 @@ class Router:
         elif event.type == EventType.MESSAGE:
             await self._handle_message(event)
 
-        # Attach stored handle for display (populated from nodeinfo or heartbeat)
+        if event.meta.get("silent"):
+            return
+
+        # Attach stored handle for display; prefer what's already in meta (Pi bridge name field)
         if event.from_node and "from_handle" not in event.meta:
             handle = self._db.get_node_handle(event.from_node)
             if handle:
@@ -80,7 +83,7 @@ class Router:
 
         self._db.insert_message(from_node, to_node, text, "in")
         if from_node:
-            self._db.upsert_node(from_node)
+            self._db.upsert_node(from_node, handle=event.meta.get("from_handle", ""))
 
         is_for_us = (to_node == self._node_id) or not to_node
 
