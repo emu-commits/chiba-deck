@@ -47,19 +47,23 @@ class MQTTTransport:
         if self._status_cb and self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._status_cb, msg)
 
-    def _nodes_topic(self) -> str | None:
+    def _derived_topic(self, suffix: str) -> str | None:
         rx = self._cfg.mqtt.topic_rx
-        candidate = rx.replace("/rx", "/nodes")
+        candidate = rx.replace("/rx", f"/{suffix}")
         return candidate if candidate != rx else None
 
+    def _nodes_topic(self) -> str | None:
+        return self._derived_topic("nodes")
+
     def _history_topic(self) -> str | None:
-        rx = self._cfg.mqtt.topic_rx
-        candidate = rx.replace("/rx", "/history")
-        return candidate if candidate != rx else None
+        return self._derived_topic("history")
+
+    def _gateway_topic(self) -> str | None:
+        return self._derived_topic("gateway")
 
     def _subscribe_topics(self, client):
         client.subscribe(self._cfg.mqtt.topic_rx)
-        for t in (self._nodes_topic(), self._history_topic()):
+        for t in (self._nodes_topic(), self._history_topic(), self._gateway_topic()):
             if t:
                 client.subscribe(t)
 
@@ -103,6 +107,16 @@ class MQTTTransport:
                     )
                     if self._loop and not self._loop.is_closed():
                         self._loop.call_soon_threadsafe(self._eq.put_nowait, event)
+                return
+
+            # Gateway topic: auto-configure our own node ID
+            gt = self._gateway_topic()
+            if gt and msg.topic == gt and isinstance(data, dict):
+                node_id = _node_id_str(data.get("id", ""))
+                if node_id and node_id != self._cfg.node_id:
+                    self._cfg.node_id = node_id
+                    self._node_id = node_id
+                    log.info(f"node ID auto-set from gateway: {node_id}")
                 return
 
             # History topic: replay last N messages into the stream

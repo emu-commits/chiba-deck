@@ -54,7 +54,6 @@ def save_config(config: Config, path: str = "config.yaml"):
         data = {}
 
     data["node_id"] = config.node_id
-    data["node_handle"] = config.node_handle
     data.setdefault("mqtt", {})
     data["mqtt"]["broker"] = config.mqtt.broker
     data["mqtt"]["port"] = config.mqtt.port

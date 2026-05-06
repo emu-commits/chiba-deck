@@ -4,7 +4,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, ListItem, ListView, Static
+from textual.widgets import Button, Input, Label, ListItem, ListView, Static, Rule
 
 from ..config import Config, save_config
 
@@ -123,27 +123,39 @@ class ConfigScreen(ModalScreen[bool]):
 
     #save-btn:hover   { background: #2a5a2a; }
     #cancel-btn:hover { color: #aaaaaa; border: solid #777777; }
+
+    .node-val {
+        width: 1fr;
+        height: 3;
+        content-align: left middle;
+        color: #2a6a2a;
+        padding-left: 1;
+    }
     """
 
-    BINDINGS = [Binding("escape", "cancel", show=False)]
+    BINDINGS = [
+        Binding("escape", "cancel", "cancel", show=True),
+        Binding("ctrl+s", "save", "save", show=True),
+    ]
 
-    def __init__(self, config: Config, transport=None):
+    def __init__(self, config: Config, transport=None, node_name: str = ""):
         super().__init__()
         self._cfg = config
         self._transport = transport
         self._scanned_topics: list[str] = []
+        self._node_name = node_name
 
     def compose(self) -> ComposeResult:
         with Container(id="dialog"):
             yield Label("■  CHIBA CONFIG  ■", id="title")
 
-            yield Label("── Node ─────────────────────────────────────────", classes="section-label")
+            yield Label("── Node (auto from radio) ───────────────────────", classes="section-label")
             with Horizontal(classes="row"):
                 yield Label("Node ID", classes="lbl")
-                yield Input(self._cfg.node_id, id="node-id", classes="inp")
+                yield Static(self._cfg.node_id or "connecting…", id="node-id-val", classes="node-val")
             with Horizontal(classes="row"):
-                yield Label("Handle", classes="lbl")
-                yield Input(self._cfg.node_handle, id="node-handle", classes="inp")
+                yield Label("Name", classes="lbl")
+                yield Static(self._node_name or "—", id="node-name-val", classes="node-val")
 
             yield Label("── MQTT ─────────────────────────────────────────", classes="section-label")
             with Horizontal(classes="row"):
@@ -209,11 +221,11 @@ class ConfigScreen(ModalScreen[bool]):
             self.query_one("#topic-rx", Input).value = topic
             self.query_one("#topic-tx", Input).value = topic
 
+    def action_save(self):
+        self._save()
+
     def _save(self):
         try:
-            self._cfg.node_id = self.query_one("#node-id", Input).value.strip()
-            self._cfg.node_handle = self.query_one("#node-handle", Input).value.strip()
-
             new_broker = self.query_one("#broker", Input).value.strip()
             new_port = int(self.query_one("#port", Input).value.strip())
             new_rx = self.query_one("#topic-rx", Input).value.strip()

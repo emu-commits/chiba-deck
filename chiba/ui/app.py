@@ -151,8 +151,9 @@ class ChibaApp(App):
         self._pending_confirmation = None
 
     async def action_config(self):
+        node_name = self._db.get_node_handle(self._cfg.node_id) if self._db else ""
         changed = await self.push_screen_wait(
-            ConfigScreen(self._cfg, self._transport)
+            ConfigScreen(self._cfg, self._transport, node_name=node_name)
         )
         if changed:
             stream = self.query_one("#stream", StreamPanel)
