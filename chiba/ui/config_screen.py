@@ -160,21 +160,21 @@ class ConfigScreen(ModalScreen[bool]):
             yield Label("── MQTT ─────────────────────────────────────────", classes="section-label")
             with Horizontal(classes="row"):
                 yield Label("Broker", classes="lbl")
-                yield Input(self._cfg.mqtt.broker, id="broker", classes="inp")
+                yield Input(self._cfg.mqtt.broker, placeholder="192.168.1.x", id="broker", classes="inp")
             with Horizontal(classes="row"):
                 yield Label("Port", classes="lbl")
-                yield Input(str(self._cfg.mqtt.port), id="port", classes="inp")
+                yield Input(str(self._cfg.mqtt.port), placeholder="1883", id="port", classes="inp")
             with Horizontal(classes="row"):
                 yield Label("Topic RX", classes="lbl")
-                yield Input(self._cfg.mqtt.topic_rx, id="topic-rx", classes="inp")
+                yield Input(self._cfg.mqtt.topic_rx, placeholder="msh/region/rx", id="topic-rx", classes="inp")
             with Horizontal(classes="row"):
                 yield Label("Topic TX", classes="lbl")
-                yield Input(self._cfg.mqtt.topic_tx, id="topic-tx", classes="inp")
+                yield Input(self._cfg.mqtt.topic_tx, placeholder="msh/region/tx", id="topic-tx", classes="inp")
 
             yield Label("── Topic Discovery ──────────────────────────────", classes="section-label")
             with Horizontal(id="scan-row"):
                 yield Button("Scan msh/# (5s)", id="scan-btn")
-                yield Static("← scan live broker, click to use", id="scan-status")
+                yield Static("← click result to load into RX + TX", id="scan-status")
             yield ListView(id="topic-list")
 
             with Horizontal(id="btn-row"):
@@ -189,6 +189,9 @@ class ConfigScreen(ModalScreen[bool]):
         elif event.button.id == "cancel-btn":
             self.dismiss(False)
 
+    # Meta topics published by the bridge that are never used as rx/tx
+    _META_SUFFIXES = {"/history", "/nodes", "/channels", "/gateway"}
+
     async def _do_scan(self):
         status = self.query_one("#scan-status", Static)
         btn = self.query_one("#scan-btn", Button)
@@ -200,17 +203,41 @@ class ConfigScreen(ModalScreen[bool]):
             btn.disabled = False
             return
 
-        topics = await self._transport.scan_topics(timeout=5.0)
-        self._scanned_topics = topics
+        raw = await self._transport.scan_topics(timeout=5.0)
+
+        # Drop known meta/housekeeping topics
+        candidates = [t for t in raw
+                      if not any(t.endswith(s) for s in self._META_SUFFIXES)]
+
+        # Build display list: pair /rx topics with their /tx partner
+        topic_set = set(candidates)
+        seen_bases: set[str] = set()
+        display: list[tuple[str, str]] = []  # (rx_topic, label)
+
+        for t in candidates:
+            if t.endswith("/rx"):
+                base = t[:-2]          # strip "rx"
+                tx = base + "tx"
+                seen_bases.add(base)
+                label = f"{t}  →  {tx}" if tx in topic_set else t
+                display.append((t, label))
+            elif t.endswith("/tx"):
+                base = t[:-2]
+                if base not in seen_bases:  # only show tx if no rx partner was shown
+                    display.append((t, t))
+            else:
+                display.append((t, t))
+
+        self._scanned_topics = [t for t, _ in display]
 
         lv = self.query_one("#topic-list", ListView)
         lv.clear()
-        if topics:
-            for t in topics:
-                await lv.append(ListItem(Label(t)))
-            status.update(f"{len(topics)} found — click to select")
+        if display:
+            for _, label in display:
+                await lv.append(ListItem(Label(label)))
+            status.update(f"{len(display)} found — click to load")
         else:
-            status.update("no msh/ traffic seen during 5s scan")
+            status.update("no message topics seen — try again")
 
         btn.disabled = False
 
@@ -218,8 +245,15 @@ class ConfigScreen(ModalScreen[bool]):
         idx = event.index
         if 0 <= idx < len(self._scanned_topics):
             topic = self._scanned_topics[idx]
-            self.query_one("#topic-rx", Input).value = topic
-            self.query_one("#topic-tx", Input).value = topic
+            # Smart pair: /rx → derive /tx; /tx → derive /rx; otherwise set both
+            if topic.endswith("/rx"):
+                rx, tx = topic, topic[:-2] + "tx"
+            elif topic.endswith("/tx"):
+                rx, tx = topic[:-2] + "rx", topic
+            else:
+                rx, tx = topic, topic
+            self.query_one("#topic-rx", Input).value = rx
+            self.query_one("#topic-tx", Input).value = tx
 
     def action_save(self):
         self._save()
