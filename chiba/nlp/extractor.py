@@ -50,9 +50,10 @@ def extract(intent: str, text: str) -> Entities:
             e.target_node = m.group(1)
 
     elif intent == "send_chat":
+        # Strip leading verb/noun prefix, keep the actual message
         m = re.search(
             r'(?:say|broadcast|post)\s+(.+)'
-            r'|(?:send|message|tell)\s+(?:a\s+)?(?:message|msg|everyone|the\s+mesh|mesh|channel|to\s+channel)?\s+(.+)',
+            r'|(?:send|tell)\s+(?:(?:a\s+)?(?:message|msg|everyone|the\s+mesh|mesh|channel|to\s+channel)\s+)?(.+)',
             text, re.IGNORECASE
         )
         if m:
