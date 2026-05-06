@@ -48,16 +48,20 @@ class MQTTTransport:
             self._loop.call_soon_threadsafe(self._status_cb, msg)
 
     def _nodes_topic(self) -> str | None:
-        """Derive the norns nodes-list topic from topic_rx, or None if not applicable."""
         rx = self._cfg.mqtt.topic_rx
         candidate = rx.replace("/rx", "/nodes")
         return candidate if candidate != rx else None
 
+    def _history_topic(self) -> str | None:
+        rx = self._cfg.mqtt.topic_rx
+        candidate = rx.replace("/rx", "/history")
+        return candidate if candidate != rx else None
+
     def _subscribe_topics(self, client):
         client.subscribe(self._cfg.mqtt.topic_rx)
-        nt = self._nodes_topic()
-        if nt:
-            client.subscribe(nt)
+        for t in (self._nodes_topic(), self._history_topic()):
+            if t:
+                client.subscribe(t)
 
     def _on_connect(self, client, userdata, *args):
         # paho v1: args = (flags_dict, rc_int)
@@ -96,6 +100,31 @@ class MQTTTransport:
                         from_node=node_id,
                         payload=node.get("longName", node_id),
                         meta={"handle": node.get("longName", ""), "caps": [], "silent": True},
+                    )
+                    if self._loop and not self._loop.is_closed():
+                        self._loop.call_soon_threadsafe(self._eq.put_nowait, event)
+                return
+
+            # History topic: replay last N messages into the stream
+            ht = self._history_topic()
+            if ht and msg.topic == ht and isinstance(data, list):
+                for item in data:
+                    from_node = _node_id_str(item.get("from", ""))
+                    to_node = _node_id_str(item.get("to", ""))
+                    text = item.get("text", "")
+                    name = item.get("name", "")
+                    if not text or not from_node:
+                        continue
+                    meta = {"history": True}
+                    if name:
+                        meta["from_handle"] = name
+                    event = Event(
+                        type=EventType.MESSAGE,
+                        ts=item.get("ts", time.time()),
+                        from_node=from_node,
+                        to_node=to_node,
+                        payload=text,
+                        meta=meta,
                     )
                     if self._loop and not self._loop.is_closed():
                         self._loop.call_soon_threadsafe(self._eq.put_nowait, event)

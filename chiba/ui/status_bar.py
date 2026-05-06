@@ -26,6 +26,6 @@ class StatusBar(Widget):
         t.append("● ", style="dim green on black")
         t.append(f"wallet: {self.balance} ", style="green on black")
         t.append("● ", style="dim green on black")
-        t.append(f"{self.unread} msgs", style="green on black")
+        t.append(f"{self.unread} in last hr", style="green on black")
         t.append(" " * 200, style="on black")
         return t

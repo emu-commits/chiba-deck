@@ -52,12 +52,15 @@ class Router:
         self._display_cb = display_queue.put_nowait
 
     async def process_event(self, event: Event):
-        self._db.insert_event(event.type.value, event.from_node, event.payload)
+        is_history = event.meta.get("history")
+
+        if not is_history:
+            self._db.insert_event(event.type.value, event.from_node, event.payload)
 
         if event.type == EventType.HEARTBEAT:
             await self._handle_heartbeat(event)
         elif event.type == EventType.MESSAGE:
-            await self._handle_message(event)
+            await self._handle_message(event, store=not is_history)
 
         if event.meta.get("silent"):
             return
@@ -77,14 +80,15 @@ class Router:
         self._registry.upsert_remote(event.from_node, caps)
         self._db.upsert_node(event.from_node, handle=handle, caps=caps)
 
-    async def _handle_message(self, event: Event):
+    async def _handle_message(self, event: Event, store: bool = True):
         text = event.payload.strip()
         from_node = event.from_node
         to_node = event.to_node
 
-        self._db.insert_message(from_node, to_node, text, "in")
-        if from_node:
-            self._db.upsert_node(from_node, handle=event.meta.get("from_handle", ""))
+        if store:
+            self._db.insert_message(from_node, to_node, text, "in")
+            if from_node:
+                self._db.upsert_node(from_node, handle=event.meta.get("from_handle", ""))
 
         is_for_us = (to_node == self._node_id) or not to_node
 
