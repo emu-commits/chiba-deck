@@ -95,12 +95,18 @@ class Database:
                 INSERT INTO nodes (node_id, handle, caps_json, hops, snr, last_seen)
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(node_id) DO UPDATE SET
-                    handle=excluded.handle,
+                    handle=CASE WHEN excluded.handle != '' THEN excluded.handle ELSE handle END,
                     caps_json=excluded.caps_json,
                     hops=excluded.hops,
                     snr=excluded.snr,
                     last_seen=excluded.last_seen
             """, (node_id, handle, caps_json, hops, snr, time.time()))
+
+    def get_node_handle(self, node_id: str) -> str:
+        row = self._conn.execute(
+            "SELECT handle FROM nodes WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        return row["handle"] if row and row["handle"] else ""
 
     def get_nodes_online(self, max_age_s: float = 172800) -> list[dict]:
         cutoff = time.time() - max_age_s

@@ -58,13 +58,20 @@ class Router:
         elif event.type == EventType.MESSAGE:
             await self._handle_message(event)
 
+        # Attach stored handle for display (populated from nodeinfo or heartbeat)
+        if event.from_node and "from_handle" not in event.meta:
+            handle = self._db.get_node_handle(event.from_node)
+            if handle:
+                event.meta["from_handle"] = handle
+
         if self._display_cb:
             self._display_cb(event)
 
     async def _handle_heartbeat(self, event: Event):
         caps = event.meta.get("caps", [])
+        handle = event.meta.get("handle", "")
         self._registry.upsert_remote(event.from_node, caps)
-        self._db.upsert_node(event.from_node, caps=caps)
+        self._db.upsert_node(event.from_node, handle=handle, caps=caps)
 
     async def _handle_message(self, event: Event):
         text = event.payload.strip()
@@ -72,6 +79,8 @@ class Router:
         to_node = event.to_node
 
         self._db.insert_message(from_node, to_node, text, "in")
+        if from_node:
+            self._db.upsert_node(from_node)
 
         is_for_us = (to_node == self._node_id) or not to_node
 

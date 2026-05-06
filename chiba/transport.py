@@ -13,6 +13,20 @@ log = logging.getLogger(__name__)
 
 RETRY_DELAY = 15  # seconds between reconnect attempts
 
+_BROADCAST_IDS = {"^all", "4294967295", str(0xFFFFFFFF)}
+
+
+def _node_id_str(v) -> str:
+    """Convert a Meshtastic node ID (int or str) to !hexid; return '' for broadcast."""
+    if v is None or v == "":
+        return ""
+    if isinstance(v, int):
+        if v == 0xFFFFFFFF:
+            return ""
+        return f"!{v:08x}"
+    s = str(v)
+    return "" if s in _BROADCAST_IDS else s
+
 
 class MQTTTransport:
     def __init__(self, config, node_id: str, event_queue: EventQueue):
@@ -64,9 +78,23 @@ class MQTTTransport:
             log.debug(f"transport parse error: {e}")
 
     def _parse(self, data: dict) -> Event | None:
-        from_node = data.get("from", "")
-        to_node = data.get("to", "")
+        from_node = _node_id_str(data.get("from", ""))
+        to_node = _node_id_str(data.get("to", ""))
         payload = data.get("payload", data.get("text", ""))
+
+        # Meshtastic nodeinfo packets carry a dict payload with longName/shortName
+        if isinstance(payload, dict):
+            long_name = payload.get("longName", payload.get("long_name", ""))
+            short_name = payload.get("shortName", payload.get("short_name", ""))
+            handle = long_name or short_name
+            if not from_node:
+                return None
+            return Event(
+                type=EventType.HEARTBEAT,
+                from_node=from_node,
+                payload=handle or from_node,
+                meta={"handle": handle, "caps": []},
+            )
 
         if not payload:
             return None

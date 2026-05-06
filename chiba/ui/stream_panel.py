@@ -37,21 +37,29 @@ class StreamPanel(RichLog):
             return datetime.datetime.fromtimestamp(ts).strftime("%H:%M")
         return datetime.datetime.now().strftime("%H:%M")
 
+    def _node_label(self, node_id: str, meta: dict) -> str:
+        handle = meta.get("from_handle", "")
+        if handle and handle != node_id:
+            return f"{handle} ({node_id})"
+        return node_id
+
     def render_event(self, event: Event):
         ts = self._ts(event)
 
         if event.type == EventType.HEARTBEAT:
             caps = event.meta.get("caps", [])
             caps_str = " ".join(f"?{c}" for c in caps) if caps else "(no caps)"
+            label = self._node_label(event.from_node, event.meta)
             line = Text(f"[{ts}] ", style="#2a4a2a")
             line.append("NODE ", style="bold yellow")
-            line.append(f"{event.from_node} ", style="bold #00ff41")
+            line.append(f"{label} ", style="bold #00ff41")
             line.append(f"[{caps_str}]", style="#666666")
 
         elif event.type == EventType.MESSAGE:
+            label = self._node_label(event.from_node, event.meta)
             line = Text(f"[{ts}] ", style="#2a4a2a")
             if event.from_node:
-                line.append(f"{event.from_node}", style="bold #00cc33")
+                line.append(label, style="bold #00cc33")
                 if event.to_node:
                     line.append(" → ", style="#444444")
                     line.append(f"{event.to_node} ", style="#00cc33")
