@@ -136,6 +136,9 @@ class ChibaApp(App):
             reply = await self._router.handle_user_input(text, force=force)
             if not reply:
                 return
+            if reply == "__config__":
+                await self.action_config()
+                return
             if reply.startswith("[?]"):
                 self._pending_confirmation = text
             stream.write_reply(reply)

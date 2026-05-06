@@ -22,6 +22,7 @@ _INTENT_TO_CMD: dict[str, str] = {
     "check_history": "history",
     "get_help": "help",
     "show_status": "status",
+    "open_config": "__config__",
 }
 
 
@@ -114,6 +115,9 @@ class Router:
 
         intent, confidence = self._classifier.classify(text)
         entities = extract(intent, text)
+
+        if intent == "open_config":
+            return "__config__"
 
         threshold = getattr(self._classifier, "threshold", self._cfg.nlp.confidence_threshold)
         if not force and confidence < threshold:
