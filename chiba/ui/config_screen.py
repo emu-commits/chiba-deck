@@ -4,7 +4,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, ListItem, ListView, Static, Rule
+from textual.widgets import Button, Input, Label, ListItem, ListView, Static
 
 from ..config import Config, save_config
 
@@ -22,19 +22,27 @@ class ConfigScreen(ModalScreen[bool]):
         height: auto;
         background: #0a0f0a;
         border: double #00ff41;
-        padding: 1 2;
+        padding: 0 2;
     }
 
     #title {
         text-align: center;
         color: #00ff41;
         text-style: bold;
-        margin-bottom: 1;
+        margin-top: 1;
+        margin-bottom: 0;
     }
 
     .section-label {
         color: #2a4a2a;
         margin-top: 1;
+        margin-bottom: 0;
+    }
+
+    #node-info {
+        color: #2a6a2a;
+        height: 1;
+        padding: 0 1;
         margin-bottom: 0;
     }
 
@@ -62,7 +70,7 @@ class ConfigScreen(ModalScreen[bool]):
 
     #scan-row {
         height: 3;
-        margin-top: 1;
+        margin-top: 0;
     }
 
     #scan-btn {
@@ -84,7 +92,7 @@ class ConfigScreen(ModalScreen[bool]):
     }
 
     #topic-list {
-        height: 7;
+        height: 4;
         border: solid #1a3a1a;
         background: #020902;
         margin-top: 0;
@@ -104,6 +112,7 @@ class ConfigScreen(ModalScreen[bool]):
         height: 3;
         align: center middle;
         margin-top: 1;
+        margin-bottom: 1;
     }
 
     #save-btn {
@@ -111,26 +120,18 @@ class ConfigScreen(ModalScreen[bool]):
         color: #00ff41;
         border: solid #00ff41;
         margin-right: 3;
-        min-width: 18;
+        min-width: 22;
     }
 
     #cancel-btn {
         background: #0a0f0a;
         color: #555555;
         border: solid #333333;
-        min-width: 12;
+        min-width: 16;
     }
 
     #save-btn:hover   { background: #2a5a2a; }
     #cancel-btn:hover { color: #aaaaaa; border: solid #777777; }
-
-    .node-val {
-        width: 1fr;
-        height: 3;
-        content-align: left middle;
-        color: #2a6a2a;
-        padding-left: 1;
-    }
     """
 
     BINDINGS = [
@@ -146,16 +147,15 @@ class ConfigScreen(ModalScreen[bool]):
         self._node_name = node_name
 
     def compose(self) -> ComposeResult:
+        node_id = self._cfg.node_id or "connecting…"
+        name = self._node_name or ""
+        node_line = f"{node_id}  {name}" if name else node_id
+
         with Container(id="dialog"):
             yield Label("■  CHIBA CONFIG  ■", id="title")
 
-            yield Label("── Node (auto from radio) ───────────────────────", classes="section-label")
-            with Horizontal(classes="row"):
-                yield Label("Node ID", classes="lbl")
-                yield Static(self._cfg.node_id or "connecting…", id="node-id-val", classes="node-val")
-            with Horizontal(classes="row"):
-                yield Label("Name", classes="lbl")
-                yield Static(self._node_name or "—", id="node-name-val", classes="node-val")
+            yield Label("── Node (auto) ──────────────────────────────────", classes="section-label")
+            yield Static(node_line, id="node-info")
 
             yield Label("── MQTT ─────────────────────────────────────────", classes="section-label")
             with Horizontal(classes="row"):
@@ -174,12 +174,12 @@ class ConfigScreen(ModalScreen[bool]):
             yield Label("── Topic Discovery ──────────────────────────────", classes="section-label")
             with Horizontal(id="scan-row"):
                 yield Button("Scan msh/# (5s)", id="scan-btn")
-                yield Static("← scan live broker, click result to use", id="scan-status")
+                yield Static("← scan live broker, click to use", id="scan-status")
             yield ListView(id="topic-list")
 
             with Horizontal(id="btn-row"):
-                yield Button("Save & Apply", id="save-btn")
-                yield Button("Cancel", id="cancel-btn")
+                yield Button("Save & Apply  [^S]", id="save-btn")
+                yield Button("Cancel  [esc]", id="cancel-btn")
 
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "scan-btn":
@@ -196,7 +196,7 @@ class ConfigScreen(ModalScreen[bool]):
         status.update("scanning… (5s)")
 
         if not self._transport or not self._transport.connected:
-            status.update("not connected to broker — connect first, then scan")
+            status.update("not connected — connect first, then scan")
             btn.disabled = False
             return
 
@@ -208,7 +208,7 @@ class ConfigScreen(ModalScreen[bool]):
         if topics:
             for t in topics:
                 await lv.append(ListItem(Label(t)))
-            status.update(f"{len(topics)} topic(s) found — click to select")
+            status.update(f"{len(topics)} found — click to select")
         else:
             status.update("no msh/ traffic seen during 5s scan")
 
