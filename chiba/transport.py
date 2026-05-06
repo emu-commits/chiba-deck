@@ -170,6 +170,49 @@ class MQTTTransport:
         self._client.publish(self._cfg.mqtt.topic_tx, msg)
         log.info(f"broadcast: {text[:80]}")
 
+    async def scan_topics(self, timeout: float = 5.0) -> list[str]:
+        """Subscribe to msh/# for `timeout` seconds and return unique topics seen."""
+        if not self._connected or not self._client:
+            return []
+
+        found: set[str] = set()
+        orig = self._client.on_message
+
+        def scanner(client, userdata, msg):
+            found.add(msg.topic)
+            orig(client, userdata, msg)
+
+        self._client.subscribe("msh/#")
+        self._client.on_message = scanner
+        await asyncio.sleep(timeout)
+        self._client.on_message = orig
+        self._client.unsubscribe("msh/#")
+        # Re-ensure we're on our configured topic
+        self._client.subscribe(self._cfg.mqtt.topic_rx)
+        return sorted(found)
+
+    def update_topics(self, topic_rx: str, topic_tx: str):
+        """Hot-swap subscribed topics without reconnecting."""
+        old_rx = self._cfg.mqtt.topic_rx
+        self._cfg.mqtt.topic_rx = topic_rx
+        self._cfg.mqtt.topic_tx = topic_tx
+        if self._connected and self._client:
+            if old_rx != topic_rx:
+                self._client.unsubscribe(old_rx)
+                self._client.subscribe(topic_rx)
+            self._emit(f"topics updated → rx={topic_rx}  tx={topic_tx}")
+
+    def trigger_reconnect(self):
+        """Force a reconnect cycle (e.g. after broker change)."""
+        self._connected = False
+        if self._client:
+            try:
+                self._client.loop_stop()
+                self._client.disconnect()
+            except Exception:
+                pass
+            self._client = None
+
     def can_reply_to(self, node_id: str, cooldown_s: int = 15) -> bool:
         now = time.time()
         if now - self._cooldowns.get(node_id, 0) >= cooldown_s:

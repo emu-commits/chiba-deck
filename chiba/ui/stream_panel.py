@@ -17,6 +17,20 @@ class StreamPanel(RichLog):
     }
     """
 
+    MAX_BUFFER = 500
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._plain_lines: list[str] = []
+
+    def _store(self, plain: str):
+        self._plain_lines.append(plain)
+        if len(self._plain_lines) > self.MAX_BUFFER:
+            self._plain_lines = self._plain_lines[-self.MAX_BUFFER:]
+
+    def get_text(self, n: int = 100) -> str:
+        return "\n".join(self._plain_lines[-n:])
+
     def _ts(self, event: Event | None = None) -> str:
         ts = event.ts if event else None
         if ts:
@@ -63,6 +77,7 @@ class StreamPanel(RichLog):
         else:
             line = Text(f"[{ts}] {event.payload}", style="#444444")
 
+        self._store(line.plain)
         self.write(line)
 
     def write_system(self, text: str):
@@ -70,6 +85,7 @@ class StreamPanel(RichLog):
         line = Text(f"[{ts}] ", style="#2a4a2a")
         line.append("SYS ", style="bold #ff8800")
         line.append(text, style="#888888")
+        self._store(line.plain)
         self.write(line)
 
     def write_reply(self, text: str):
@@ -77,6 +93,7 @@ class StreamPanel(RichLog):
         line = Text(f"[{ts}] ", style="#2a4a2a")
         line.append("→ ", style="bold #00ff41")
         line.append(text, style="#ffffff")
+        self._store(line.plain)
         self.write(line)
 
     def write_input_echo(self, text: str):
@@ -84,4 +101,5 @@ class StreamPanel(RichLog):
         line = Text(f"[{ts}] ", style="#2a4a2a")
         line.append("> ", style="bold #00aaff")
         line.append(text, style="#88ccff")
+        self._store(line.plain)
         self.write(line)

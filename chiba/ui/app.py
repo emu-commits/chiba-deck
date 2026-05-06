@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import subprocess
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Input
 
 from ..events import EventQueue
+from .config_screen import ConfigScreen
 from .status_bar import StatusBar
 from .stream_panel import StreamPanel
 
@@ -51,6 +53,8 @@ class ChibaApp(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "quit", show=False),
         Binding("ctrl+q", "quit", "quit", show=True),
+        Binding("ctrl+o", "config", "config", show=True),
+        Binding("ctrl+y", "copy_log", "copy log", show=True),
         Binding("escape", "clear_input", "clear", show=False),
     ]
 
@@ -143,5 +147,44 @@ class ChibaApp(App):
         self.query_one("#input", Input).value = ""
         self._pending_confirmation = None
 
+    async def action_config(self):
+        changed = await self.push_screen_wait(
+            ConfigScreen(self._cfg, self._transport)
+        )
+        if changed:
+            stream = self.query_one("#stream", StreamPanel)
+            stream.write_system("config saved to config.yaml")
+
+    def action_copy_log(self):
+        stream = self.query_one("#stream", StreamPanel)
+        text = stream.get_text(100)
+        if not text:
+            stream.write_system("nothing to copy")
+            return
+        copied = _copy_to_clipboard(text)
+        if copied:
+            stream.write_system("copied last 100 lines to clipboard")
+        else:
+            stream.write_system(
+                "clipboard failed — install xclip, xsel, or wl-copy  "
+                "(or check chiba.log for full history)"
+            )
+
     def action_quit(self):
         self.exit()
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    for cmd in (
+        ["xclip", "-selection", "clipboard"],
+        ["xsel", "--clipboard", "--input"],
+        ["wl-copy"],
+    ):
+        try:
+            subprocess.run(cmd, input=text.encode(), timeout=3,
+                           check=True, capture_output=True)
+            return True
+        except (FileNotFoundError, subprocess.CalledProcessError,
+                subprocess.TimeoutExpired):
+            continue
+    return False

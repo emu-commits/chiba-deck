@@ -43,6 +43,28 @@ class Config:
     payments_wallet_path: str = "wallet.json"
 
 
+def save_config(config: Config, path: str = "config.yaml"):
+    # Read existing file first so we preserve keys we don't manage
+    for src in [path, "config.example.yaml"]:
+        if Path(src).exists():
+            with open(src) as f:
+                data = yaml.safe_load(f) or {}
+            break
+    else:
+        data = {}
+
+    data["node_id"] = config.node_id
+    data["node_handle"] = config.node_handle
+    data.setdefault("mqtt", {})
+    data["mqtt"]["broker"] = config.mqtt.broker
+    data["mqtt"]["port"] = config.mqtt.port
+    data["mqtt"]["topic_rx"] = config.mqtt.topic_rx
+    data["mqtt"]["topic_tx"] = config.mqtt.topic_tx
+
+    with open(path, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+
 def load_config(path: str = "config.yaml") -> Config:
     for candidate in [path, "config.example.yaml"]:
         if Path(candidate).exists():
