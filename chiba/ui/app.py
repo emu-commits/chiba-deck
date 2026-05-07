@@ -112,6 +112,8 @@ class ChibaApp(App):
                         await asyncio.sleep(0.3)
                 else:
                     event = await self._display_queue.get()
+                    if event.meta.get("history_end"):
+                        continue
                     stream.render_event(event)
                     if not event.meta.get("history"):
                         await asyncio.sleep(0.3)

@@ -79,6 +79,8 @@ class StreamPanel(RichLog):
             line.append(event.payload, style="#ffaa00")
 
         elif event.type == EventType.SYSTEM:
+            if not event.payload:
+                return
             line = Text(f"[{ts}] ", style="#2a4a2a")
             line.append("SYS ", style="bold #ff8800")
             line.append(event.payload, style="#888888")
