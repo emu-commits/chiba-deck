@@ -69,6 +69,13 @@ class Router:
         if event.type == EventType.MESSAGE and event.from_node and event.payload:
             key = (event.from_node, round(event.ts or 0), event.payload[:80])
             if key in self._msg_seen:
+                # Dedup suppresses display, but still process inbound ?commands
+                # addressed to us — the bridge may echo our own DMs sub-second,
+                # causing a ts collision that would otherwise silence the command.
+                if (not is_history
+                        and event.to_node == self._node_id
+                        and event.payload.strip().startswith("?")):
+                    await self._handle_message(event, store=False)
                 return
             self._msg_seen.add(key)
 
