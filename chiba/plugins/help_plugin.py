@@ -1,6 +1,6 @@
 from .base import Plugin
 
-_MESH_HELP = "?say ?dm ?nodes ?status ?balance ?pay ?wiki ?market ?help | chiba-deck v0.1"
+_MESH_HELP = "?say ?dm ?nodes ?status ?balance ?pay ?market ?help | chiba-deck v0.1"
 
 _LOCAL_HELP = """\
 ── mesh commands ────────────────────────────────────
@@ -10,7 +10,6 @@ _LOCAL_HELP = """\
   ?status                   wallet balance + node count
   ?balance                  check wallet balance
   ?pay <handle> <amt>       send ZK payment  (not yet active)
-  ?wiki <topic>             wiki lookup — forwarded to wiki node if online
   ?market                   marketplace listings — forwarded if online
   ?history                  show recent message history
   ?ping <handle>            ping a node
