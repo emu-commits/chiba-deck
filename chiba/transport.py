@@ -89,6 +89,11 @@ class MQTTTransport:
 
     def _on_message(self, client, userdata, msg):
         try:
+            # Retained messages on topic_rx are redelivered on reconnect — skip them;
+            # the history topic is the authoritative replay source.
+            if msg.retain and msg.topic == self._cfg.mqtt.topic_rx:
+                return
+
             text = msg.payload.decode()
             data = json.loads(text)
 
@@ -203,6 +208,7 @@ class MQTTTransport:
 
         return Event(
             type=EventType.MESSAGE,
+            ts=data.get("ts", time.time()),
             from_node=from_node,
             to_node=to_node,
             payload=str(payload),
