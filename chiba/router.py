@@ -206,14 +206,6 @@ class Router:
                 else:
                     return f"node '{recipient}' not found — try ?nodes"
 
-            # Self-DM: if message is a command, dispatch it locally — the bridge
-            # doesn't echo outbound tx back on rx, so it would never reach _handle_inbound_cmd
-            if node_id == self._node_id and message.startswith("?"):
-                parts = message.lstrip("?").split(None, 1)
-                return await self._dispatch_cmd(parts[0].lower(),
-                                                parts[1] if len(parts) > 1 else "",
-                                                message)
-
             if not self._transport or not self._transport.connected:
                 return "not connected — can't send"
             ok = self._transport.send_dm(node_id, message)
