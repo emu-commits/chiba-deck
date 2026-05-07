@@ -61,8 +61,9 @@ class StreamPanel(RichLog):
             if event.from_node:
                 line.append(label, style="bold #00cc33")
                 if event.to_node:
+                    to_label = event.meta.get("to_handle", "") or event.to_node
                     line.append(" → ", style="#444444")
-                    line.append(f"{event.to_node} ", style="#00cc33")
+                    line.append(f"{to_label}: ", style="#00cc33")
                 else:
                     line.append(": ", style="#444444")
             line.append(event.payload, style="#ccffcc")
@@ -98,11 +99,15 @@ class StreamPanel(RichLog):
 
     def write_reply(self, text: str):
         ts = datetime.datetime.now().strftime("%H:%M")
-        line = Text(f"[{ts}] ", style="#2a4a2a")
-        line.append("→ ", style="bold #00ff41")
-        line.append(text, style="#ffffff")
-        self._store(line.plain)
-        self.write(line)
+        lines = text.split("\n")
+        for i, ln in enumerate(lines):
+            if not ln:
+                continue
+            t = Text(f"[{ts}] " if i == 0 else "       ", style="#2a4a2a")
+            t.append("→ " if i == 0 else "  ", style="bold #00ff41" if i == 0 else "#1a3a1a")
+            t.append(ln, style="#ffffff")
+            self._store(t.plain)
+            self.write(t)
 
     def write_input_echo(self, text: str):
         ts = datetime.datetime.now().strftime("%H:%M")

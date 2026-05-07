@@ -137,6 +137,8 @@ class ConfigScreen(ModalScreen[bool]):
     BINDINGS = [
         Binding("escape", "cancel", "cancel", show=True),
         Binding("ctrl+s", "save", "save", show=True),
+        Binding("up", "nav_up", show=False, priority=True),
+        Binding("down", "nav_down", show=False, priority=True),
     ]
 
     def __init__(self, config: Config, transport=None, node_name: str = ""):
@@ -181,6 +183,29 @@ class ConfigScreen(ModalScreen[bool]):
                 yield Button("Save & Apply  [^S]", id="save-btn")
                 yield Button("Cancel  [esc]", id="cancel-btn")
 
+    def action_nav_down(self):
+        if isinstance(self.focused, ListView):
+            lv = self.focused
+            count = len(lv._nodes)
+            if count == 0:
+                self.focus_next()
+            elif lv.index is not None and lv.index >= count - 1:
+                self.focus_next()
+            else:
+                lv.action_cursor_down()
+        else:
+            self.focus_next()
+
+    def action_nav_up(self):
+        if isinstance(self.focused, ListView):
+            lv = self.focused
+            if not lv._nodes or lv.index == 0:
+                self.focus_previous()
+            else:
+                lv.action_cursor_up()
+        else:
+            self.focus_previous()
+
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "scan-btn":
             self.run_worker(self._do_scan(), exclusive=False)
@@ -189,8 +214,8 @@ class ConfigScreen(ModalScreen[bool]):
         elif event.button.id == "cancel-btn":
             self.dismiss(False)
 
-    # Meta topics published by the bridge that are never used as rx/tx
-    _META_SUFFIXES = {"/history", "/nodes", "/channels", "/gateway"}
+    # Suffixes of bridge housekeeping topics — used to DERIVE the rx/tx prefix
+    _META_SUFFIXES = ("history", "nodes", "channels", "gateway")
 
     async def _do_scan(self):
         status = self.query_one("#scan-status", Static)
@@ -204,29 +229,35 @@ class ConfigScreen(ModalScreen[bool]):
             return
 
         raw = await self._transport.scan_topics(timeout=5.0)
-
-        # Drop known meta/housekeeping topics
-        candidates = [t for t in raw
-                      if not any(t.endswith(s) for s in self._META_SUFFIXES)]
-
-        # Build display list: pair /rx topics with their /tx partner
-        topic_set = set(candidates)
+        topic_set = set(raw)
         seen_bases: set[str] = set()
         display: list[tuple[str, str]] = []  # (rx_topic, label)
 
-        for t in candidates:
+        # Pass 1: direct live rx/tx traffic seen during scan window
+        for t in raw:
             if t.endswith("/rx"):
-                base = t[:-2]          # strip "rx"
+                base = t[:-2]
                 tx = base + "tx"
                 seen_bases.add(base)
                 label = f"{t}  →  {tx}" if tx in topic_set else t
                 display.append((t, label))
             elif t.endswith("/tx"):
                 base = t[:-2]
-                if base not in seen_bases:  # only show tx if no rx partner was shown
-                    display.append((t, t))
-            else:
-                display.append((t, t))
+                if base not in seen_bases:
+                    seen_bases.add(base)
+                    rx = base + "rx"
+                    display.append((rx, f"{rx}  →  {t}"))
+
+        # Pass 2: derive prefix from retained meta topics (available immediately)
+        for t in raw:
+            last = t.rsplit("/", 1)[-1]
+            if last in self._META_SUFFIXES:
+                base = t[: -(len(last))]   # e.g. "msh/norns/"
+                if base not in seen_bases:
+                    seen_bases.add(base)
+                    rx = base + "rx"
+                    tx = base + "tx"
+                    display.append((rx, f"{rx}  →  {tx}"))
 
         self._scanned_topics = [t for t, _ in display]
 

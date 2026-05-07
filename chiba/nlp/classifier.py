@@ -49,8 +49,19 @@ class IntentClassifier:
         norm = np.linalg.norm(v)
         return v / norm if norm > 0 else v
 
+    # High-confidence patterns checked before TF-IDF — for command-word prefixes
+    # that are unambiguous regardless of what follows (proper nouns, novel words, etc.)
+    _PRECHECK: list[tuple[re.Pattern, str]] = [
+        (re.compile(r'^dm\s+', re.I), "send_dm"),
+        (re.compile(r'^(?:say|broadcast)\s+', re.I), "send_chat"),
+    ]
+
     def classify(self, text: str) -> tuple[str, float]:
         text = re.sub(r'^\?', '', text.lower().strip())
+
+        for pattern, intent in self._PRECHECK:
+            if pattern.match(text):
+                return intent, 0.95
 
         if not self._loaded or self._matrix is None:
             return self._keyword_fallback(text)
@@ -72,7 +83,6 @@ class IntentClassifier:
         keywords = {
             "balance": "check_balance",
             "pay": "send_payment",
-            "send": "send_payment",
             "wiki": "query_wiki",
             "look": "query_wiki",
             "what is": "query_wiki",
@@ -86,6 +96,9 @@ class IntentClassifier:
             "history": "check_history",
             "help": "get_help",
             "status": "show_status",
+            "dm ": "send_dm",
+            "direct message": "send_dm",
+            "private message": "send_dm",
         }
         for kw, intent in keywords.items():
             if kw in text:

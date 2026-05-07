@@ -108,6 +108,26 @@ class Database:
         ).fetchone()
         return row["handle"] if row and row["handle"] else ""
 
+    def find_node_by_handle(self, handle: str) -> str:
+        """Return node_id for an exact (then prefix) case-insensitive handle match."""
+        row = self._conn.execute(
+            "SELECT node_id FROM nodes WHERE lower(handle) = lower(?)", (handle,)
+        ).fetchone()
+        if row:
+            return row["node_id"]
+        row = self._conn.execute(
+            "SELECT node_id FROM nodes WHERE lower(handle) LIKE lower(?) ORDER BY last_seen DESC",
+            (f"{handle}%",)
+        ).fetchone()
+        return row["node_id"] if row else ""
+
+    def find_node_by_handle_exact(self, handle: str) -> str:
+        """Return node_id for an exact case-insensitive handle match only (no prefix)."""
+        row = self._conn.execute(
+            "SELECT node_id FROM nodes WHERE lower(handle) = lower(?)", (handle,)
+        ).fetchone()
+        return row["node_id"] if row else ""
+
     def get_nodes_online(self, max_age_s: float = 172800) -> list[dict]:
         cutoff = time.time() - max_age_s
         rows = self._conn.execute(
@@ -143,6 +163,21 @@ class Database:
             self._conn.execute(
                 "DELETE FROM service_registry WHERE last_seen < ?", (cutoff,)
             )
+
+    def get_recent_messages(self, direction: str | None = None,
+                            max_age_s: float = 86400, limit: int = 200) -> list[dict]:
+        cutoff = time.time() - max_age_s
+        if direction:
+            rows = self._conn.execute(
+                "SELECT * FROM messages WHERE ts > ? AND direction = ? ORDER BY ts ASC LIMIT ?",
+                (cutoff, direction, limit)
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM messages WHERE ts > ? ORDER BY ts ASC LIMIT ?",
+                (cutoff, limit)
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def insert_message(self, from_id: str, to_id: str, text: str, direction: str = "in"):
         with self.tx():

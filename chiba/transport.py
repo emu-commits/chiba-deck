@@ -122,7 +122,7 @@ class MQTTTransport:
             # History topic: replay last N messages into the stream
             ht = self._history_topic()
             if ht and msg.topic == ht and isinstance(data, list):
-                for item in data:
+                for item in sorted(data, key=lambda x: x.get("ts", 0)):
                     from_node = _node_id_str(item.get("from", ""))
                     to_node = _node_id_str(item.get("to", ""))
                     text = item.get("text", "")
@@ -142,6 +142,10 @@ class MQTTTransport:
                     )
                     if self._loop and not self._loop.is_closed():
                         self._loop.call_soon_threadsafe(self._eq.put_nowait, event)
+                # Sentinel: signals the drain that all history has arrived
+                sentinel = Event(type=EventType.SYSTEM, meta={"history_end": True})
+                if self._loop and not self._loop.is_closed():
+                    self._loop.call_soon_threadsafe(self._eq.put_nowait, sentinel)
                 return
 
             event = self._parse(data)
@@ -300,8 +304,9 @@ class MQTTTransport:
             found.add(msg.topic)
             orig(client, userdata, msg)
 
-        self._client.subscribe("msh/#")
+        # Set callback before subscribing so retained messages aren't missed
         self._client.on_message = scanner
+        self._client.subscribe("msh/#")
         await asyncio.sleep(timeout)
         self._client.on_message = orig
         self._client.unsubscribe("msh/#")

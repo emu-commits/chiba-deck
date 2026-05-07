@@ -99,6 +99,19 @@ async def _main():
         payload=f"chiba-deck v0.1 | node {config.node_id} | ?help for commands",
     ))
 
+    # Replay all recent messages from SQLite (both sent and received).
+    # MQTT retained history also provides inbound messages, but SQLite is authoritative
+    # and available offline. Dedup in the router blocks any MQTT overlap.
+    for row in db.get_recent_messages(max_age_s=86400):
+        transport_eq.put_nowait(Event(
+            type=EventType.MESSAGE,
+            ts=row["ts"],
+            from_node=row["from_id"] or "",
+            to_node=row["to_id"] or "",
+            payload=row["text"],
+            meta={"history": True},
+        ))
+
     async def event_processor():
         while True:
             try:
@@ -125,6 +138,9 @@ async def _main():
 
     try:
         await app.run_async()
+    except Exception as e:
+        log.error(f"app crash: {e}", exc_info=True)
+        raise
     finally:
         for t in tasks:
             t.cancel()

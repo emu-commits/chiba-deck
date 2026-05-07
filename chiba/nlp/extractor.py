@@ -49,6 +49,22 @@ def extract(intent: str, text: str) -> Entities:
         if m:
             e.target_node = m.group(1)
 
+    elif intent == "send_dm":
+        # Capture everything after the verb and optional "to" as a single string.
+        # The router resolves handle vs message via greedy DB lookup, handles spaces in names.
+        m = re.search(
+            r'(?:dm|text|message|msg|tell)\s+(?:to\s+)?(.+)'
+            r'|(?:send(?:\s+a)?(?:\s+(?:dm|message|msg|note|private\s+message))?'
+            r'|private(?:\s+message)?|direct(?:\s+message)?|write(?:\s+to)?|reach\s+out\s+to)'
+            r'\s+(?:to\s+)?(.+)',
+            text, re.IGNORECASE
+        )
+        if m:
+            e.target_node = (m.group(1) or m.group(2) or "").strip()
+        else:
+            e.target_node = text
+        e.query = ""
+
     elif intent == "send_chat":
         # Strip leading verb/noun prefix, keep the actual message
         m = re.search(

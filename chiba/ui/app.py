@@ -81,11 +81,40 @@ class ChibaApp(App):
 
     async def _event_drain(self):
         stream = self.query_one("#stream", StreamPanel)
+        history_buf: list = []
+        history_done = False
+
+        async def flush_history():
+            nonlocal history_done
+            history_done = True
+            history_buf.sort(key=lambda e: e.ts or 0)
+            for e in history_buf:
+                stream.render_event(e)
+            history_buf.clear()
+
         while True:
             try:
-                event = await self._display_queue.get()
-                stream.render_event(event)
-                await asyncio.sleep(0.3)
+                if not history_done:
+                    try:
+                        event = await asyncio.wait_for(
+                            self._display_queue.get(), timeout=4.0
+                        )
+                    except asyncio.TimeoutError:
+                        await flush_history()
+                        continue
+
+                    if event.meta.get("history_end"):
+                        await flush_history()
+                    elif event.meta.get("history"):
+                        history_buf.append(event)
+                    else:
+                        stream.render_event(event)
+                        await asyncio.sleep(0.3)
+                else:
+                    event = await self._display_queue.get()
+                    stream.render_event(event)
+                    if not event.meta.get("history"):
+                        await asyncio.sleep(0.3)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -137,7 +166,7 @@ class ChibaApp(App):
             if not reply:
                 return
             if reply == "__config__":
-                await self.action_config()
+                await self._open_config()
                 return
             if reply.startswith("[?]"):
                 self._pending_confirmation = text
@@ -150,7 +179,10 @@ class ChibaApp(App):
         self.query_one("#input", Input).value = ""
         self._pending_confirmation = None
 
-    async def action_config(self):
+    def action_config(self):
+        self.run_worker(self._open_config(), exclusive=False)
+
+    async def _open_config(self):
         node_name = self._db.get_node_handle(self._cfg.node_id) if self._db else ""
         changed = await self.push_screen_wait(
             ConfigScreen(self._cfg, self._transport, node_name=node_name)
