@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     caps_json TEXT,
     hops      INTEGER DEFAULT 0,
     snr       REAL DEFAULT 0.0,
-    last_seen REAL
+    last_seen REAL,
+    pubkey    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -76,7 +77,13 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self):
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(nodes)")}
+        if "pubkey" not in cols:
+            self._conn.execute("ALTER TABLE nodes ADD COLUMN pubkey TEXT")
 
     @contextmanager
     def tx(self):
@@ -107,6 +114,19 @@ class Database:
             "SELECT handle FROM nodes WHERE node_id = ?", (node_id,)
         ).fetchone()
         return row["handle"] if row and row["handle"] else ""
+
+    def get_node_pubkey(self, node_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT pubkey FROM nodes WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        return row["pubkey"] if row and row["pubkey"] else None
+
+    def set_node_pubkey(self, node_id: str, pubkey_hex: str) -> None:
+        with self.tx():
+            self._conn.execute(
+                "UPDATE nodes SET pubkey = ? WHERE node_id = ?",
+                (pubkey_hex, node_id),
+            )
 
     def find_node_by_handle(self, handle: str) -> str:
         """Return node_id for an exact (then prefix) case-insensitive handle match."""
@@ -192,6 +212,29 @@ class Database:
             "SELECT COUNT(*) FROM messages WHERE direction='in' AND ts > ?",
             (cutoff,)
         ).fetchone()[0]
+
+    def insert_payment_in(self, from_node: str, amount: float, token_hex: str) -> int:
+        with self.tx():
+            cur = self._conn.execute(
+                "INSERT INTO payments_in (from_node, amount, token, ts, status) VALUES (?, ?, ?, ?, ?)",
+                (from_node, amount, token_hex, time.time(), "received")
+            )
+        return cur.lastrowid
+
+    def insert_payment_out(self, to_node: str, amount: float, token_hex: str) -> int:
+        with self.tx():
+            cur = self._conn.execute(
+                "INSERT INTO payments_out (to_node, amount, token, ts, status) VALUES (?, ?, ?, ?, ?)",
+                (to_node, amount, token_hex, time.time(), "sent")
+            )
+        return cur.lastrowid
+
+    def get_payments_in(self, limit: int = 50) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT from_node, amount, ts, status FROM payments_in ORDER BY ts DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def insert_event(self, type_: str, from_id: str, payload: str):
         with self.tx():

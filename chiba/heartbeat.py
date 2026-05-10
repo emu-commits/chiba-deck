@@ -9,11 +9,13 @@ log = logging.getLogger(__name__)
 
 
 class HeartbeatService:
-    def __init__(self, config, registry: ServiceRegistry, transport: MQTTTransport, node_handle: str):
+    def __init__(self, config, registry: ServiceRegistry, transport: MQTTTransport,
+                 node_handle: str, pubkey: str = ""):
         self._cfg = config
         self._registry = registry
         self._transport = transport
         self._handle = node_handle
+        self._pubkey = pubkey
 
     def _payload(self) -> str:
         caps = self._registry.local_caps()
@@ -35,5 +37,7 @@ class HeartbeatService:
 
     def _broadcast(self):
         payload = self._payload()
-        self._transport.send_broadcast(payload)
-        log.info(f"heartbeat: {payload}")
+        self._transport.send_chiba_broadcast(payload)
+        if self._pubkey:
+            self._transport.send_pubkey_announce(self._pubkey)
+        log.info(f"heartbeat (port 258): {payload}")

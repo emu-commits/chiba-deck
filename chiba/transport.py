@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -37,10 +38,15 @@ class MQTTTransport:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._connected = False
         self._cooldowns: dict[str, float] = {}
-        self._status_cb = None  # callable(str) — fed into stream panel
+        self._status_cb = None   # callable(str) — fed into stream panel
+        self._token_cb = None    # callable(bytes, str) — inbound token handler
 
     def set_status_cb(self, cb):
         self._status_cb = cb
+
+    def set_token_cb(self, cb):
+        """Register callback for inbound 225-byte token messages: cb(token_bytes, from_node)."""
+        self._token_cb = cb
 
     def _emit(self, msg: str):
         log.info(f"MQTT: {msg}")
@@ -189,6 +195,41 @@ class MQTTTransport:
         if msg_type in ("position", "telemetry", "waypoint", "routing", "admin"):
             return None
 
+        # Chiba heartbeat received off port 258 (not from chat channel)
+        if msg_type == "heartbeat":
+            hb_payload = data.get("payload", "")
+            caps = re.findall(r'\?(\w+)', hb_payload.split("|")[0])
+            return Event(
+                type=EventType.HEARTBEAT,
+                from_node=from_node,
+                payload=hb_payload,
+                meta={"caps": caps},
+            )
+
+        # Pubkey announcement — silent heartbeat, only parsed by chiba-deck nodes
+        if msg_type == "pubkey_announce":
+            pubkey_hex = data.get("payload", "")
+            if from_node and isinstance(pubkey_hex, str) and len(pubkey_hex) == 64:
+                return Event(
+                    type=EventType.HEARTBEAT,
+                    from_node=from_node,
+                    meta={"pubkey": pubkey_hex, "caps": [], "silent": True},
+                )
+            return None
+
+        # 225-byte bound token (Port 256): base64-encoded binary payload
+        if msg_type == "token":
+            if self._token_cb is not None:
+                raw_b64 = data.get("payload", "")
+                if isinstance(raw_b64, str):
+                    try:
+                        token_bytes = base64.b64decode(raw_b64)
+                        if self._loop and not self._loop.is_closed():
+                            self._loop.call_soon_threadsafe(self._token_cb, token_bytes, from_node)
+                    except Exception as e:
+                        log.debug(f"token decode error from {from_node}: {e}")
+            return None
+
         # Resolve text: Pi bridge uses top-level "text"; standard JSON uses payload.text
         payload = data.get("payload", data.get("text", ""))
         if isinstance(payload, dict):
@@ -288,6 +329,31 @@ class MQTTTransport:
         msg = json.dumps({"from": self._node_id, "to": to_node, "type": "text", "payload": text})
         self._client.publish(self._cfg.mqtt.topic_tx, msg)
         log.debug(f"DM → {to_node}: {text[:60]}")
+        return True
+
+    def send_chiba_broadcast(self, payload: str):
+        """Send a heartbeat on port 258 — NOT the chat channel."""
+        if not self._connected or not self._client:
+            log.debug(f"send_chiba_broadcast offline: {payload[:60]}")
+            return
+        msg = json.dumps({"from": self._node_id, "type": "heartbeat", "payload": payload})
+        self._client.publish(self._cfg.mqtt.topic_tx, msg)
+        log.debug(f"chiba broadcast: {payload[:60]}")
+
+    def send_pubkey_announce(self, pubkey_hex: str):
+        if not self._connected or not self._client:
+            return
+        msg = json.dumps({"from": self._node_id, "type": "pubkey_announce", "payload": pubkey_hex})
+        self._client.publish(self._cfg.mqtt.topic_tx, msg)
+
+    def send_token(self, to_node: str, token_bytes: bytes) -> bool:
+        if not self._connected or not self._client:
+            log.debug(f"send_token offline: {to_node}")
+            return False
+        payload = base64.b64encode(token_bytes).decode()
+        msg = json.dumps({"from": self._node_id, "to": to_node, "type": "token", "payload": payload})
+        self._client.publish(self._cfg.mqtt.topic_tx, msg)
+        log.debug(f"token → {to_node}: {len(token_bytes)} bytes")
         return True
 
     def send_broadcast(self, text: str):

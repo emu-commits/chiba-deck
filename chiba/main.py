@@ -8,7 +8,8 @@ from .db import Database
 from .events import Event, EventQueue, EventType
 from .heartbeat import HeartbeatService
 from .nlp.classifier import IntentClassifier
-from .payments.wallet import BalancePlugin, WalletPlugin
+from .payments import receiver as token_receiver
+from .payments.wallet import BalancePlugin, WalletPlugin, init_payments
 from .plugins.help_plugin import HelpPlugin
 from .plugins.loader import load_plugins
 from .plugins.nodes_plugin import NodesPlugin
@@ -46,9 +47,19 @@ async def _main():
         log.warning(f"embeddings not found at {config.nlp.embeddings_path}")
         log.warning("run: python scripts/build_embeddings.py")
 
+    # Payments
+    payment_wallet = init_payments(config)
+
     # Built-in plugins
     wallet = WalletPlugin()
     balance = BalancePlugin()
+
+    wallet.set_db(db)
+    wallet.set_transport(transport)
+
+    if payment_wallet is not None:
+        token_receiver.init(payment_wallet, db, display_eq, config)
+        transport.set_token_cb(token_receiver.handle_token_message)
 
     nodes_plugin = NodesPlugin()
     nodes_plugin.set_db(db)
@@ -85,6 +96,7 @@ async def _main():
         registry=registry,
         transport=transport,
         node_handle=config.node_handle,
+        pubkey=payment_wallet.get_pubkey() if payment_wallet else "",
     )
 
     # Route MQTT status messages into the stream panel as SYS events

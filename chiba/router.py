@@ -108,6 +108,9 @@ class Router:
         handle = event.meta.get("handle", "")
         self._registry.upsert_remote(event.from_node, caps)
         self._db.upsert_node(event.from_node, handle=handle, caps=caps)
+        pubkey = event.meta.get("pubkey", "")
+        if pubkey:
+            self._db.set_node_pubkey(event.from_node, pubkey)
 
     async def _handle_message(self, event: Event, store: bool = True):
         text = event.payload.strip()

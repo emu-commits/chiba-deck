@@ -4,8 +4,8 @@ node_handle: "chiba"
 mqtt:
   broker: "192.168.1.179"
   port: 1883
-  topic_rx: "msh/test/rx"
-  topic_tx: "msh/test/tx"
+  topic_rx: "msh/chiba/rx"
+  topic_tx: "msh/chiba/tx"
 
 ble:
   enabled: false
@@ -25,4 +25,7 @@ db:
   path: "chiba.db"
 
 payments:
-  wallet_path: "wallet.json"
+  enabled: false
+  wallet_db: "wallet.db"
+  mesh_cash_path: ""          # absolute path to mesh-cash repo root, e.g. /home/pi/mesh-cash
+  rate_limit_per_min: 4       # max incoming token verifications per sender per minute
