@@ -9,6 +9,16 @@ INTENTS: dict[str, list[str]] = {
         "funds available",
         "my balance",
     ],
+    "show_wallet": [
+        "wallet status",
+        "wallet info",
+        "payment setup",
+        "setup payments",
+        "configure payments",
+        "show wallet",
+        "wallet setup",
+        "payment wallet",
+    ],
     "send_payment": [
         "pay someone",
         "send money to",

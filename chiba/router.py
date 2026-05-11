@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 
 _INTENT_TO_CMD: dict[str, str] = {
     "check_balance": "balance",
+    "show_wallet": "wallet",
     "send_payment": "pay",
     "send_dm": "dm",
     "query_wiki": "wiki",

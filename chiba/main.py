@@ -9,7 +9,7 @@ from .events import Event, EventQueue, EventType
 from .heartbeat import HeartbeatService
 from .nlp.classifier import IntentClassifier
 from .payments import receiver as token_receiver
-from .payments.wallet import BalancePlugin, WalletPlugin, init_payments
+from .payments.wallet import BalancePlugin, WalletInfoPlugin, WalletPlugin, init_payments
 from .plugins.help_plugin import HelpPlugin
 from .plugins.loader import load_plugins
 from .plugins.nodes_plugin import NodesPlugin
@@ -53,6 +53,7 @@ async def _main():
     # Built-in plugins
     wallet = WalletPlugin()
     balance = BalancePlugin()
+    wallet_info = WalletInfoPlugin()
 
     wallet.set_db(db)
     wallet.set_transport(transport)
@@ -71,7 +72,7 @@ async def _main():
     status_plugin.set_db(db)
     status_plugin.set_wallet(wallet)
 
-    for plugin in [nodes_plugin, help_plugin, status_plugin, wallet, balance]:
+    for plugin in [nodes_plugin, help_plugin, status_plugin, wallet, balance, wallet_info]:
         registry.register_local(plugin)
 
     # Auto-load extra plugins from plugins/

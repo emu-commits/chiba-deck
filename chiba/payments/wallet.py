@@ -44,9 +44,7 @@ CREATE TABLE IF NOT EXISTS received_tokens (
 );
 """
 
-_MESH_CASH = None   # set by init_payments()
-_VK_PATH   = None
-_CLAIM_VK_PATH  = None
+_config_ref = None  # set by init_payments() — used by WalletInfoPlugin
 
 def _mc():
     """Lazy import — fails gracefully if not installed."""
@@ -204,6 +202,8 @@ def init_payments(config) -> CryptoWallet | None:
     """
     global _wallet, _vk_path, _claim_vk_path
     global _zkey_path, _claim_zkey_path, _wasm_path, _claim_wasm_path, _snarkjs_path
+    global _config_ref
+    _config_ref = config
 
     if not config.payments.enabled:
         log.info("Payments disabled (set payments.enabled=true in config.yaml)")
@@ -354,8 +354,95 @@ class BalancePlugin(Plugin):
 
     def handle(self, query: str, from_node: str | None = None) -> str:
         if _wallet is None:
-            return "wallet: n/a — payments disabled (see config.yaml)"
+            return "wallet: payments off — run ?wallet for setup steps"
         bal = _wallet.balance()
         if not bal:
-            return "wallet: $0.00 — no tokens received yet"
+            return "wallet: $0.00 (no tokens received yet)"
         return f"wallet: {_wallet.balance_str()}"
+
+
+class WalletInfoPlugin(Plugin):
+    """
+    `?wallet` — show payment layer status and setup instructions.
+
+    When payments are disabled or not yet configured, prints exact steps.
+    When active, shows pubkey, balance, and unbound token inventory.
+    """
+
+    cmd = "wallet"
+    description = "payment wallet status and setup"
+    local = True
+
+    def handle(self, query: str, from_node: str | None = None) -> str:
+        cfg = _config_ref
+        mc = _mc()
+
+        lines = ["── PAYMENT LAYER ──────────────────────"]
+
+        # ── 1. Enabled? ──────────────────────────────────────────────────────
+        enabled = cfg is not None and cfg.payments.enabled
+        lines.append(f"  enabled:     {'YES' if enabled else 'NO'}")
+
+        if not enabled:
+            lines.append("")
+            lines.append("  To enable, edit config.yaml:")
+            lines.append("    payments:")
+            lines.append("      enabled: true")
+            mc_path_hint = (
+                cfg.payments.mesh_cash_path if (cfg and cfg.payments.mesh_cash_path)
+                else "/path/to/mesh-cash"
+            )
+            lines.append(f"      mesh_cash_path: {mc_path_hint}")
+            lines.append("")
+            lines.append("  Then install the crypto library:")
+            lines.append(f"    cd {mc_path_hint}/crypto")
+            lines.append("    maturin develop --features pyo3-bindings")
+            lines.append("")
+            lines.append("  Restart chiba-deck — keypair is auto-generated.")
+            return "\n".join(lines)
+
+        # ── 2. Crypto lib installed? ──────────────────────────────────────────
+        if mc is None:
+            mc_path = cfg.payments.mesh_cash_path or "/path/to/mesh-cash"
+            lines.append("  crypto lib:  NOT INSTALLED")
+            lines.append("")
+            lines.append("  Install mesh_cash_crypto:")
+            lines.append(f"    cd {mc_path}/crypto")
+            lines.append("    maturin develop --features pyo3-bindings")
+            lines.append("  Then restart chiba-deck.")
+            return "\n".join(lines)
+
+        lines.append("  crypto lib:  OK")
+
+        # ── 3. Wallet / keypair ───────────────────────────────────────────────
+        if _wallet is None:
+            lines.append("  wallet:      NOT OPEN (restart to retry)")
+            return "\n".join(lines)
+
+        pk = _wallet.get_pubkey()
+        if pk:
+            lines.append(f"  pubkey:      {pk[:16]}...{pk[-8:]}")
+        else:
+            lines.append("  pubkey:      (generating...)")
+
+        # ── 4. Balance ────────────────────────────────────────────────────────
+        bal = _wallet.balance()
+        total = sum(d * c for d, c in bal.items())
+        bal_str = _wallet.balance_str() if bal else "$0.00"
+        lines.append(f"  balance:     {bal_str}")
+
+        # ── 5. Unbound token inventory ────────────────────────────────────────
+        unbound = _wallet.unbound_count()
+        if unbound:
+            parts = "  ".join(f"${d}×{c}" for d, c in sorted(unbound.items()))
+            lines.append(f"  unbound:     {parts}  (ready to send)")
+        else:
+            lines.append("  unbound:     none")
+            lines.append("")
+            lines.append("  To top up, deposit USDC to the smart contract then run:")
+            mc_path = cfg.payments.mesh_cash_path or "/path/to/mesh-cash"
+            lines.append(f"    cd {mc_path}")
+            lines.append("    python -m daemon.batch_mint --count=5 --denomination=5")
+
+        lines.append("────────────────────────────────────────")
+        return "\n".join(lines)
