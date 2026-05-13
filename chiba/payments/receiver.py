@@ -68,7 +68,7 @@ def handle_token_message(token_bytes: bytes, from_node: str) -> None:
         return
 
     denomination = token_bytes[0]
-    if denomination not in (1, 5, 10, 20):
+    if denomination not in (1, 5, 10, 20, 50, 100):
         log.debug(f"invalid denomination {denomination} from {from_node}")
         return
 
