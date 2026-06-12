@@ -11,7 +11,9 @@ Wallet DB schema mirrors the mesh-cash daemon schema minus encryption.
 
 import importlib
 import logging
+import os
 import re
+import secrets
 import sqlite3
 import time
 from pathlib import Path
@@ -36,18 +38,29 @@ CREATE TABLE IF NOT EXISTS unbound_tokens (
     status       TEXT NOT NULL DEFAULT 'ready'
 );
 CREATE TABLE IF NOT EXISTS received_tokens (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    token_hex    TEXT NOT NULL,
-    from_node    TEXT,
-    denomination INTEGER NOT NULL,
-    commitment   TEXT NOT NULL,
-    ts           REAL NOT NULL,
-    redeemed     INTEGER NOT NULL DEFAULT 0
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hex        TEXT NOT NULL,
+    from_node        TEXT,
+    denomination     INTEGER NOT NULL,
+    commitment       TEXT NOT NULL,
+    ts               REAL NOT NULL,
+    redeemed         INTEGER NOT NULL DEFAULT 0,
+    new_secret       TEXT,
+    is_respend       INTEGER NOT NULL DEFAULT 0,
+    spend_token_hex  TEXT
 );
 """
 
-_config_ref = None  # set by init_payments() — used by WalletInfoPlugin
-_setup_confirm_ts: float = 0.0  # tracks y/n setup confirmation window
+_MIGRATIONS = [
+    "ALTER TABLE received_tokens ADD COLUMN new_secret TEXT",
+    "ALTER TABLE received_tokens ADD COLUMN is_respend INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE received_tokens ADD COLUMN spend_token_hex TEXT",
+    # Reject replayed token messages (mesh duplicates, bridge echoes)
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_received_token_hex ON received_tokens(token_hex)",
+]
+
+_config_ref = None      # set by init_payments() — used by WalletInfoPlugin
+_post_init_hook = None  # set by main.py — wires receiver/transport after live enable
 
 def _mc():
     """Lazy import — fails gracefully if not installed."""
@@ -74,6 +87,19 @@ class CryptoWallet:
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_WALLET_SCHEMA)
         self._conn.commit()
+        self._migrate()
+        try:
+            os.chmod(db_path, 0o600)  # privkey + token secrets live here
+        except OSError:
+            pass
+
+    def _migrate(self):
+        for sql in _MIGRATIONS:
+            try:
+                self._conn.execute(sql)
+                self._conn.commit()
+            except Exception:
+                pass  # column already exists
 
     def close(self):
         with self._lock:
@@ -124,6 +150,22 @@ class CryptoWallet:
             self._conn.commit()
         return cur.lastrowid
 
+    def get_ready_unbound_tokens(self, denomination: int | None = None) -> list[dict]:
+        """Return all ready unbound tokens, optionally filtered by denomination."""
+        with self._lock:
+            if denomination is not None:
+                rows = self._conn.execute(
+                    "SELECT id, denomination, secret, commitment FROM unbound_tokens "
+                    "WHERE status = 'ready' AND denomination = ? ORDER BY id",
+                    (denomination,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT id, denomination, secret, commitment FROM unbound_tokens "
+                    "WHERE status = 'ready' ORDER BY id"
+                ).fetchall()
+        return [dict(r) for r in rows]
+
     def claim_unbound_token(self, denomination: int) -> dict | None:
         with self._lock:
             row = self._conn.execute(
@@ -159,18 +201,86 @@ class CryptoWallet:
             ).fetchall()
         return {r[0]: r[1] for r in rows}
 
+    def in_use_count(self) -> int:
+        """Tokens claimed by a send that never completed (crash mid-spend).
+        Never auto-released: the token may already be on the mesh, and
+        re-spending the same commitment would be caught as a double-spend
+        at redemption — surface these for manual review instead."""
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM unbound_tokens WHERE status='in_use'"
+            ).fetchone()[0]
+
     # ── Received tokens ───────────────────────────────────────────────────────
 
     def add_received_token(self, token_hex: str, denomination: int,
-                           commitment_hex: str, from_node: str | None = None) -> int:
+                           commitment_hex: str, from_node: str | None = None,
+                           new_secret: str | None = None) -> int | None:
+        """Returns the new row id, or None if this exact token was already stored."""
         with self._lock:
-            cur = self._conn.execute(
-                "INSERT INTO received_tokens (token_hex, from_node, denomination, commitment, ts) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (token_hex, from_node, denomination, commitment_hex, time.time()),
-            )
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO received_tokens "
+                    "(token_hex, from_node, denomination, commitment, ts, new_secret) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (token_hex, from_node, denomination, commitment_hex, time.time(), new_secret),
+                )
+            except sqlite3.IntegrityError:
+                return None
             self._conn.commit()
         return cur.lastrowid
+
+    def add_received_respend_token(self, token_hex: str, denomination: int,
+                                   commitment_hex: str, spend_token_hex: str,
+                                   from_node: str | None = None,
+                                   new_secret: str | None = None) -> int | None:
+        """Store a received re-spend token along with the original spend token sidecar.
+        Returns the new row id, or None if this exact token was already stored."""
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO received_tokens "
+                    "(token_hex, from_node, denomination, commitment, ts, "
+                    " new_secret, is_respend, spend_token_hex) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+                    (token_hex, from_node, denomination, commitment_hex, time.time(),
+                     new_secret, spend_token_hex),
+                )
+            except sqlite3.IntegrityError:
+                return None
+            self._conn.commit()
+        return cur.lastrowid
+
+    def get_unredeemed_token(self, denomination: int) -> dict | None:
+        """Return the oldest unredeemed received token of this denomination, or None."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, token_hex, commitment, from_node, "
+                "       is_respend, spend_token_hex, new_secret "
+                "FROM received_tokens "
+                "WHERE denomination = ? AND redeemed = 0 ORDER BY ts ASC LIMIT 1",
+                (denomination,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_respendable_token(self, denomination: int) -> dict | None:
+        """Return the oldest unredeemed received token that can be re-spent (has new_secret)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, token_hex, commitment, from_node, new_secret "
+                "FROM received_tokens "
+                "WHERE denomination = ? AND redeemed = 0 AND new_secret IS NOT NULL "
+                "ORDER BY ts ASC LIMIT 1",
+                (denomination,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def mark_token_redeemed(self, token_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE received_tokens SET redeemed = 1 WHERE id = ?", (token_id,)
+            )
+            self._conn.commit()
 
     def balance(self) -> dict[int, int]:
         with self._lock:
@@ -193,10 +303,13 @@ class CryptoWallet:
 _wallet: CryptoWallet | None = None
 _vk_path: str = ""
 _claim_vk_path: str = ""
+_respend_vk_path: str = ""
 _zkey_path: str = ""
 _claim_zkey_path: str = ""
+_respend_zkey_path: str = ""
 _wasm_path: str = ""
 _claim_wasm_path: str = ""
+_respend_wasm_path: str = ""
 _snarkjs_path: str = ""
 
 
@@ -207,8 +320,9 @@ def init_payments(config) -> CryptoWallet | None:
 
     Call once at startup from main.py before creating WalletPlugin.
     """
-    global _wallet, _vk_path, _claim_vk_path
-    global _zkey_path, _claim_zkey_path, _wasm_path, _claim_wasm_path, _snarkjs_path
+    global _wallet, _vk_path, _claim_vk_path, _respend_vk_path
+    global _zkey_path, _claim_zkey_path, _respend_zkey_path
+    global _wasm_path, _claim_wasm_path, _respend_wasm_path, _snarkjs_path
     global _config_ref
     _config_ref = config
 
@@ -224,13 +338,16 @@ def init_payments(config) -> CryptoWallet | None:
     mc_path = Path(config.payments.mesh_cash_path) if config.payments.mesh_cash_path else None
 
     if mc_path and mc_path.exists():
-        _vk_path         = str(mc_path / "keys" / "verification_key.json")
-        _claim_vk_path   = str(mc_path / "keys" / "claim_verification_key.json")
-        _zkey_path       = str(mc_path / "keys" / "meshcash_spend_dev.zkey")
-        _claim_zkey_path = str(mc_path / "keys" / "meshcash_claim_dev.zkey")
-        _wasm_path       = str(mc_path / "circuit" / "build" / "meshcash_spend_js" / "meshcash_spend.wasm")
-        _claim_wasm_path = str(mc_path / "circuit" / "build" / "meshcash_claim_js" / "meshcash_claim.wasm")
-        _snarkjs_path    = str(mc_path / "node_modules" / ".bin" / "snarkjs")
+        _vk_path           = str(mc_path / "keys" / "verification_key.json")
+        _claim_vk_path     = str(mc_path / "keys" / "claim_verification_key.json")
+        _respend_vk_path   = str(mc_path / "keys" / "respend_verification_key.json")
+        _zkey_path         = str(mc_path / "keys" / "meshcash_spend_dev.zkey")
+        _claim_zkey_path   = str(mc_path / "keys" / "meshcash_claim_dev.zkey")
+        _respend_zkey_path = str(mc_path / "keys" / "meshcash_respend_dev.zkey")
+        _wasm_path         = str(mc_path / "circuit" / "build" / "meshcash_spend_js" / "meshcash_spend.wasm")
+        _claim_wasm_path   = str(mc_path / "circuit" / "build" / "meshcash_claim_js" / "meshcash_claim.wasm")
+        _respend_wasm_path = str(mc_path / "circuit" / "build" / "meshcash_spend_recursive_js" / "meshcash_spend_recursive.wasm")
+        _snarkjs_path      = str(mc_path / "node_modules" / ".bin" / "snarkjs")
     else:
         log.warning("payments.mesh_cash_path not set or missing — verify/prove paths unavailable")
 
@@ -242,6 +359,14 @@ def init_payments(config) -> CryptoWallet | None:
 
 def get_wallet() -> CryptoWallet | None:
     return _wallet
+
+
+def set_post_init_hook(cb) -> None:
+    """Register a callback(wallet) run after payments are enabled live via
+    ?wallet — main.py uses it to wire the token receiver, transport callbacks
+    and heartbeat pubkey without a restart."""
+    global _post_init_hook
+    _post_init_hook = cb
 
 
 # ── Plugins ───────────────────────────────────────────────────────────────────
@@ -308,41 +433,91 @@ class WalletPlugin(Plugin):
                 "They need to run chiba-deck with payments enabled."
             )
 
-        # Claim an unbound token and generate the bound proof
+        # Try unbound token first; fall back to re-spending a received token
         unbound = _wallet.claim_unbound_token(denomination)
-        if unbound is None:
+
+        if unbound is not None:
+            # ── Direct spend path ─────────────────────────────────────────────
+            try:
+                sk = _wallet.get_keypair()[0]
+                new_secret = mc.nullifier(sk)
+                token_hex = mc.generate_bound_token(
+                    _zkey_path, _wasm_path, _snarkjs_path,
+                    unbound["secret"], new_secret, unbound["commitment"],
+                    denomination, recipient_pubkey,
+                )
+            except Exception as e:
+                _wallet.release_unbound_token(unbound["id"])
+                log.error(f"proof generation failed: {e}")
+                return f"proof generation failed: {e}"
+
+            _wallet.consume_unbound_token(unbound["id"])
+            token_bytes = bytes.fromhex(token_hex)
+
+            if self._transport is not None:
+                # Send new_secret sidecar BEFORE the token so the receiver can associate them
+                self._transport.send_new_secret(recipient_node, bytes.fromhex(new_secret))
+                self._transport.send_token(recipient_node, token_bytes)
+                sent = True
+            else:
+                sent = False
+
+            if self._db is not None:
+                self._db.insert_payment_out(recipient_node, denomination, token_hex)
+
+            return f"sent ${denomination} to {target_handle} ✓" if sent else \
+                   f"token generated but could not send (offline?) — stored in sent log"
+
+        # ── Re-spend fallback ─────────────────────────────────────────────────
+        received = _wallet.get_respendable_token(denomination)
+        if received is None:
             return (
-                f"no unbound ${denomination} tokens available. "
-                "Run batch_mint.py to generate tokens from your Ethereum deposits."
+                f"no ${denomination} tokens available to send.\n"
+                f"Run ?mint {denomination} then ?deposit {denomination} to fund your wallet,\n"
+                f"or wait to receive a token from someone else."
             )
+
+        if not _respend_zkey_path or not _respend_wasm_path:
+            return "payments.mesh_cash_path not configured — cannot generate re-spend proof"
+
+        kp = _wallet.get_keypair()
+        if kp is None:
+            return "wallet has no keypair — run ?wallet first"
+        sk_hex, pk_hex = kp
+
+        prior_rc_hex = received["token_hex"][2:66]   # bytes[1:33] of the token as hex
+        prior_new_secret_hex = received["new_secret"]
+        BN254_P = 21888242871839275222246405745257275088548364400416034343698204186575808495617
+        fresh_new_secret_hex = secrets.randbelow(BN254_P).to_bytes(32, "big").hex()
 
         try:
-            sk = _wallet.get_keypair()[0]
-            new_secret = mc.nullifier(sk)  # deterministic fresh secret per spend
-            token_hex = mc.generate_bound_token(
-                _zkey_path, _wasm_path, _snarkjs_path,
-                unbound["secret"], new_secret, unbound["commitment"],
-                denomination, recipient_pubkey,
+            respend_token_hex = mc.generate_respend_token(
+                _respend_zkey_path, _respend_wasm_path, _snarkjs_path,
+                sk_hex, prior_new_secret_hex, fresh_new_secret_hex,
+                prior_rc_hex, denomination, recipient_pubkey,
             )
         except Exception as e:
-            _wallet.release_unbound_token(unbound["id"])
-            log.error(f"proof generation failed: {e}")
-            return f"proof generation failed: {e}"
+            log.error(f"re-spend proof generation failed: {e}")
+            return f"re-spend proof generation failed: {e}"
 
-        _wallet.consume_unbound_token(unbound["id"])
+        _wallet.mark_token_redeemed(received["id"])   # prevent double-spend
+        respend_bytes = bytes.fromhex(respend_token_hex)
+        original_token_bytes = bytes.fromhex(received["token_hex"])
 
-        token_bytes = bytes.fromhex(token_hex)
-        sent = False
         if self._transport is not None:
-            sent = self._transport.send_token(recipient_node, token_bytes)
+            # Send: sidecar (original spend token) + new_secret + re-spend token
+            self._transport.send_spend_sidecar(recipient_node, original_token_bytes)
+            self._transport.send_new_secret(recipient_node, bytes.fromhex(fresh_new_secret_hex))
+            self._transport.send_token(recipient_node, respend_bytes)
+            sent = True
+        else:
+            sent = False
 
         if self._db is not None:
-            self._db.insert_payment_out(recipient_node, denomination, token_hex)
+            self._db.insert_payment_out(recipient_node, denomination, respend_token_hex)
 
-        if sent:
-            return f"sent ${denomination} to {target_handle} ✓"
-        else:
-            return f"token generated but could not send (offline?) — stored in sent log"
+        return f"re-sent ${denomination} to {target_handle} ✓" if sent else \
+               f"re-spend token generated but could not send (offline?)"
 
     def balance_str(self) -> str:
         if _wallet is None:
@@ -447,30 +622,27 @@ class WalletInfoPlugin(Plugin):
     """
     `?wallet` — show payment layer status, or interactively enable payments.
 
-    When not yet set up, offers a y/n prompt and performs setup inline:
-      1. Writes payments.enabled=true to config.yaml
-      2. Runs `maturin develop` to build the crypto library (~10s)
-      3. Calls init_payments() live — no restart needed
+    When not yet set up, offers a y/n prompt; on confirmation it writes
+    payments.enabled=true to config.yaml and calls init_payments() live —
+    no restart needed (the crypto library must already be installed via
+    scripts/install_payments.sh).
     When active, shows pubkey, balance, and unbound token inventory.
     """
 
     cmd = "wallet"
     description = "payment wallet status and setup"
     local = True
+    accepts_force = True
 
-    def handle(self, query: str, from_node: str | None = None) -> str:
-        global _setup_confirm_ts
+    def handle(self, query: str, from_node: str | None = None, force: bool = False) -> str:
         cfg = _config_ref
         mc = _mc()
         enabled = cfg is not None and cfg.payments.enabled
 
         if not enabled:
-            # Confirmed second call within 30s → flip config flag and activate
-            if _setup_confirm_ts and time.time() - _setup_confirm_ts < 30.0:
-                _setup_confirm_ts = 0.0
+            # force=True is the y-confirmation replay from the UI prompt
+            if force:
                 return self._enable(cfg)
-            # First call → prompt
-            _setup_confirm_ts = time.time()
             return "[?] Enable payments? [y/n]"
 
         if mc is None:
@@ -508,6 +680,10 @@ class WalletInfoPlugin(Plugin):
             lines.append("  Run ?mint <count> <denomination> to generate tokens,")
             lines.append("  then deposit face value USDC per token to the MeshCash contract.")
 
+        stuck = _wallet.in_use_count()
+        if stuck:
+            lines.append(f"  in-flight:   {stuck} token(s) claimed by an interrupted send")
+
         lines.append("────────────────────────────────────────")
         return "\n".join(lines)
 
@@ -532,6 +708,11 @@ class WalletInfoPlugin(Plugin):
             cfg.payments.enabled = False
             save_config(cfg)
             return "payments failed to initialize — check chiba.log"
+        if _post_init_hook is not None:
+            try:
+                _post_init_hook(wallet_instance)
+            except Exception as e:
+                log.error(f"payments post-init wiring failed: {e}", exc_info=True)
         pk = wallet_instance.get_pubkey() or "(generating...)"
         return (
             "── PAYMENT LAYER ──────────────────────\n"

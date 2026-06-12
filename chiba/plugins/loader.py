@@ -1,3 +1,11 @@
+"""Python plugin loader — for internal / advanced use only.
+
+The standard plugin extension point is exec plugins defined in config.yaml.
+This loader is not called automatically; it exists as an escape hatch for
+plugins that need direct Python access to internals (e.g. test harnesses).
+
+To use: call load_plugins() and register the results manually with the registry.
+"""
 import importlib
 import inspect
 import logging
@@ -7,7 +15,7 @@ from .base import Plugin
 
 log = logging.getLogger(__name__)
 
-_BUILTIN_CMDS = {"nodes", "help", "status", "pay", "balance"}
+_BUILTIN_CMDS = {"nodes", "help", "status", "pay", "balance", "history"}
 
 
 def load_plugins(plugin_dir: Path | None = None) -> list[Plugin]:

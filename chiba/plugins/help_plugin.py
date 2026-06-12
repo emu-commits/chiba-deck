@@ -1,6 +1,6 @@
 from .base import Plugin
 
-_MESH_HELP = "?say ?dm ?nodes ?status ?balance ?pay ?market ?help | chiba-deck v0.1"
+_MESH_HELP = "?nodes ?help | chiba-deck v0.1"
 
 _LOCAL_HELP = """\
 ── mesh commands ────────────────────────────────────
@@ -8,12 +8,17 @@ _LOCAL_HELP = """\
   ?dm <handle> <message>    send a direct message to a node
   ?nodes                    list nodes seen in last 48 h
   ?status                   wallet balance + node count
-  ?balance                  check wallet balance
-  ?pay <handle> <amt>       send ZK payment  (not yet active)
+  ?history [handle] [n]     show recent message history
   ?market                   marketplace listings — forwarded if online
-  ?history                  show recent message history
-  ?ping <handle>            ping a node
   ?help                     this help
+── wallet ───────────────────────────────────────────
+  ?wallet                   payment status / enable payments
+  ?balance                  check wallet balance
+  ?pay <amt> to <handle>    send ZK payment over the mesh
+  ?mint [count] [denom]     generate unbound tokens
+  ?deposit [denom]          register tokens on-chain (needs internet)
+  ?redeem [denom] [addr]    redeem a token for USDC (needs internet)
+  ?pubkey                   show payment pubkey for sharing
 ── app controls ─────────────────────────────────────
   Ctrl+O   open config
   Ctrl+Y   copy last 100 lines to clipboard
@@ -26,6 +31,7 @@ class HelpPlugin(Plugin):
     cmd = "help"
     description = "list available commands"
     local = True
+    mesh_visible = True
 
     def __init__(self):
         self._registry = None

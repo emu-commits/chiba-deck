@@ -18,12 +18,15 @@ venv/
 
 # Data / runtime
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 data/
 
 # Runtime logs
 chiba.log
+textual_debug.log
 
 # Keys / secrets
 *.key

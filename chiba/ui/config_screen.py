@@ -228,6 +228,11 @@ class ConfigScreen(ModalScreen[bool]):
             btn.disabled = False
             return
 
+        if not hasattr(self._transport, "scan_topics"):
+            status.update("topic scan only available over MQTT")
+            btn.disabled = False
+            return
+
         raw = await self._transport.scan_topics(timeout=5.0)
         topic_set = set(raw)
         seen_bases: set[str] = set()

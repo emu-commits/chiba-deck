@@ -79,6 +79,11 @@ class Router:
                     await self._handle_message(event, store=False)
                 return
             self._msg_seen.add(key)
+            # Keep the dedup set bounded: keys older than a day can't collide
+            # with live traffic any more (ts is part of the key).
+            if len(self._msg_seen) > 4096:
+                cutoff = time.time() - 86400
+                self._msg_seen = {k for k in self._msg_seen if k[1] > cutoff}
 
         if not is_history:
             self._db.insert_event(event.type.value, event.from_node, event.payload)
@@ -108,7 +113,9 @@ class Router:
         caps = event.meta.get("caps", [])
         handle = event.meta.get("handle", "")
         self._registry.upsert_remote(event.from_node, caps)
-        self._db.upsert_node(event.from_node, handle=handle, caps=caps)
+        # Empty caps means the packet carried none (e.g. plain nodeinfo) —
+        # don't wipe caps learned from a real chiba heartbeat.
+        self._db.upsert_node(event.from_node, handle=handle, caps=caps or None)
         pubkey = event.meta.get("pubkey", "")
         if pubkey:
             self._db.set_node_pubkey(event.from_node, pubkey)
@@ -135,6 +142,8 @@ class Router:
 
     async def _handle_inbound_cmd(self, from_node: str, text: str):
         parts = text.lstrip("?").split(None, 1)
+        if not parts:
+            return
         cmd = parts[0].lower()
         query = parts[1] if len(parts) > 1 else ""
 
@@ -142,13 +151,20 @@ class Router:
         if not plugin:
             return
 
+        # Never execute non-mesh plugins for remote senders: wallet commands
+        # (?pay ?redeem ?deposit ?mint) would let any node drive this wallet.
+        if not plugin.mesh_visible:
+            log.warning(f"blocked inbound ?{cmd} from {from_node} (not mesh-visible)")
+            return
+
         if not self._transport.can_reply_to(from_node, self._cfg.mesh.cooldown_seconds):
             log.debug(f"rate-limited reply to {from_node}")
             return
 
         try:
-            reply = plugin.handle(query, from_node=from_node)
-            self._transport.send_dm(from_node, reply[:200])
+            reply = await asyncio.to_thread(plugin.handle, query, from_node=from_node)
+            if reply:
+                self._transport.send_dm(from_node, reply[:200])
         except Exception as e:
             log.error(f"plugin {cmd} error: {e}")
 
@@ -159,9 +175,11 @@ class Router:
 
         if text.startswith("?"):
             parts = text.lstrip("?").split(None, 1)
+            if not parts:
+                return "?<command> — try ?help"
             cmd = parts[0].lower()
             query = parts[1] if len(parts) > 1 else ""
-            return await self._dispatch_cmd(cmd, query, text)
+            return await self._dispatch_cmd(cmd, query, text, force=force)
 
         intent, confidence = self._classifier.classify(text)
         entities = extract(intent, text)
@@ -169,7 +187,7 @@ class Router:
         if intent == "open_config":
             return "__config__"
 
-        threshold = getattr(self._classifier, "threshold", self._cfg.nlp.confidence_threshold)
+        threshold = self._classifier.threshold
         if not force and confidence < threshold:
             cmd = _INTENT_TO_CMD.get(intent, intent)
             return (
@@ -177,9 +195,9 @@ class Router:
                 f"(confidence {confidence:.2f}) — correct? [y/n]"
             )
 
-        return await self._dispatch_intent(intent, entities, text)
+        return await self._dispatch_intent(intent, entities, text, force=force)
 
-    async def _dispatch_cmd(self, cmd: str, query: str, raw: str) -> str:
+    async def _dispatch_cmd(self, cmd: str, query: str, raw: str, force: bool = False) -> str:
         if cmd == "dm":
             words = query.split()
             if not words:
@@ -262,8 +280,13 @@ class Router:
         plugin = self._registry.get_local(cmd)
         if plugin:
             try:
-                return plugin.handle(query)
+                # Run in a thread: proof generation and web3 calls block for
+                # seconds-to-minutes and must not stall the UI event loop.
+                if plugin.accepts_force:
+                    return await asyncio.to_thread(plugin.handle, query, force=force)
+                return await asyncio.to_thread(plugin.handle, query)
             except Exception as e:
+                log.error(f"plugin {cmd} error: {e}", exc_info=True)
                 return f"error: {e}"
 
         node_id = self._registry.get_remote(cmd)
@@ -272,13 +295,13 @@ class Router:
 
         return f"?{cmd} not found — try ?help"
 
-    async def _dispatch_intent(self, intent: str, entities, raw: str) -> str:
+    async def _dispatch_intent(self, intent: str, entities, raw: str, force: bool = False) -> str:
         cmd = _INTENT_TO_CMD.get(intent, intent)
         if intent == "send_dm" and entities.target_node:
             query = f"{entities.target_node} {entities.query}".strip()
         else:
             query = entities.query or entities.item or raw
-        return await self._dispatch_cmd(cmd, query, f"?{cmd} {query}".strip())
+        return await self._dispatch_cmd(cmd, query, f"?{cmd} {query}".strip(), force=force)
 
     async def _proxy(self, node_id: str, text: str) -> str:
         timeout = self._cfg.mesh.reply_timeout_seconds

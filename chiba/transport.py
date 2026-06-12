@@ -38,8 +38,10 @@ class MQTTTransport:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._connected = False
         self._cooldowns: dict[str, float] = {}
-        self._status_cb = None   # callable(str) — fed into stream panel
-        self._token_cb = None    # callable(bytes, str) — inbound token handler
+        self._status_cb       = None   # callable(str)
+        self._token_cb        = None   # callable(bytes, str) — inbound 225-byte token
+        self._new_secret_cb   = None   # callable(bytes, str) — 32-byte new_secret sidecar
+        self._spend_sidecar_cb = None  # callable(bytes, str) — 225-byte original spend token
 
     def set_status_cb(self, cb):
         self._status_cb = cb
@@ -47,6 +49,14 @@ class MQTTTransport:
     def set_token_cb(self, cb):
         """Register callback for inbound 225-byte token messages: cb(token_bytes, from_node)."""
         self._token_cb = cb
+
+    def set_new_secret_cb(self, cb):
+        """Register callback for inbound 32-byte new_secret sidecars: cb(secret_bytes, from_node)."""
+        self._new_secret_cb = cb
+
+    def set_spend_sidecar_cb(self, cb):
+        """Register callback for inbound original spend token (re-spend sidecar): cb(token_bytes, from_node)."""
+        self._spend_sidecar_cb = cb
 
     def _emit(self, msg: str):
         log.info(f"MQTT: {msg}")
@@ -230,6 +240,32 @@ class MQTTTransport:
                         log.debug(f"token decode error from {from_node}: {e}")
             return None
 
+        # 32-byte new_secret sidecar (Port 255): hex-encoded
+        if msg_type == "new_secret":
+            if self._new_secret_cb is not None:
+                hex_val = data.get("payload", "")
+                if isinstance(hex_val, str) and len(hex_val) == 64:
+                    try:
+                        secret_bytes = bytes.fromhex(hex_val)
+                        if self._loop and not self._loop.is_closed():
+                            self._loop.call_soon_threadsafe(self._new_secret_cb, secret_bytes, from_node)
+                    except Exception as e:
+                        log.debug(f"new_secret decode error from {from_node}: {e}")
+            return None
+
+        # 225-byte original spend token sidecar (Port 257): base64-encoded
+        if msg_type == "spend_sidecar":
+            if self._spend_sidecar_cb is not None:
+                raw_b64 = data.get("payload", "")
+                if isinstance(raw_b64, str):
+                    try:
+                        sidecar_bytes = base64.b64decode(raw_b64)
+                        if self._loop and not self._loop.is_closed():
+                            self._loop.call_soon_threadsafe(self._spend_sidecar_cb, sidecar_bytes, from_node)
+                    except Exception as e:
+                        log.debug(f"spend_sidecar decode error from {from_node}: {e}")
+            return None
+
         # Resolve text: Pi bridge uses top-level "text"; standard JSON uses payload.text
         payload = data.get("payload", data.get("text", ""))
         if isinstance(payload, dict):
@@ -356,6 +392,29 @@ class MQTTTransport:
         log.debug(f"token → {to_node}: {len(token_bytes)} bytes")
         return True
 
+    def send_new_secret(self, to_node: str, new_secret_bytes: bytes) -> bool:
+        """Send a 32-byte new_secret sidecar (Port 255) to the token recipient."""
+        if not self._connected or not self._client:
+            return False
+        msg = json.dumps({
+            "from": self._node_id, "to": to_node,
+            "type": "new_secret", "payload": new_secret_bytes.hex(),
+        })
+        self._client.publish(self._cfg.mqtt.topic_tx, msg)
+        return True
+
+    def send_spend_sidecar(self, to_node: str, spend_token_bytes: bytes) -> bool:
+        """Send the original 225-byte spend token as a re-spend sidecar (Port 257)."""
+        if not self._connected or not self._client:
+            return False
+        payload = base64.b64encode(spend_token_bytes).decode()
+        msg = json.dumps({
+            "from": self._node_id, "to": to_node,
+            "type": "spend_sidecar", "payload": payload,
+        })
+        self._client.publish(self._cfg.mqtt.topic_tx, msg)
+        return True
+
     def send_broadcast(self, text: str):
         if not self._connected or not self._client:
             log.debug(f"broadcast offline: {text[:60]}")
@@ -428,7 +487,340 @@ class MQTTTransport:
 
 
 class BLETransport:
-    """Stub — implement when bleak hardware is available."""
+    """
+    Direct Meshtastic BLE transport using the meshtastic Python library.
 
-    async def connect(self):
-        raise NotImplementedError("BLE transport not yet implemented")
+    Requires: pip install "chiba-deck[ble]"
+    (adds meshtastic>=2.3 and bleak>=0.21)
+
+    Port assignments (Meshtastic private range 256–511):
+      255 : new_secret sidecar (32 bytes) — always precedes a token
+      256 : MeshCash token (225 bytes binary)
+      257 : spend_sidecar (225 bytes) — original spend token, precedes a re-spend token
+      259 : Payment pubkey announce (32 bytes binary)
+    Port 1 (TEXT_MESSAGE_APP) carries all text, including heartbeats.
+
+    config.ble.device_name — BLE device name or MAC; empty = auto-scan
+    config.ble.adapter     — HCI adapter (e.g. "hci0"); empty = OS default
+    """
+
+    PORT_NEW_SECRET    = 255
+    PORT_TOKEN         = 256
+    PORT_SPEND_SIDECAR = 257
+    PORT_PUBKEY        = 259
+
+    def __init__(self, config, node_id: str, event_queue: EventQueue):
+        self._cfg              = config
+        self._node_id          = node_id
+        self._eq               = event_queue
+        self._iface            = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._connected        = False
+        self._subscribed       = False
+        self._status_cb        = None
+        self._token_cb         = None
+        self._new_secret_cb    = None
+        self._spend_sidecar_cb = None
+        self._cooldowns: dict[str, float] = {}
+
+    def set_status_cb(self, cb):
+        self._status_cb = cb
+
+    def set_token_cb(self, cb):
+        """Register callback for inbound 225-byte token messages: cb(token_bytes, from_node)."""
+        self._token_cb = cb
+
+    def set_new_secret_cb(self, cb):
+        """Register callback for inbound 32-byte new_secret sidecars: cb(secret_bytes, from_node)."""
+        self._new_secret_cb = cb
+
+    def set_spend_sidecar_cb(self, cb):
+        """Register callback for inbound original spend token sidecars: cb(token_bytes, from_node)."""
+        self._spend_sidecar_cb = cb
+
+    def _emit(self, msg: str):
+        log.info(f"BLE: {msg}")
+        if self._status_cb and self._loop and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._status_cb, msg)
+
+    @staticmethod
+    def _node_str(num) -> str:
+        if num is None or num == 0xFFFFFFFF:
+            return ""
+        return f"!{int(num):08x}"
+
+    @staticmethod
+    def _node_int(node_id: str) -> int:
+        if not node_id or node_id.startswith("^"):
+            return 0xFFFFFFFF
+        return int(node_id.lstrip("!"), 16)
+
+    # ── PyPubSub callbacks (run in meshtastic/bleak thread) ───────────────────
+
+    def _on_receive(self, packet, interface):
+        try:
+            from_id = self._node_str(packet.get("from"))
+            decoded = packet.get("decoded", {})
+            portnum = decoded.get("portnum", "")
+
+            # Normalise string portnum → int
+            _MAP = {"TEXT_MESSAGE_APP": 1, "NODEINFO_APP": 4, "PRIVATE_APP": 256}
+            portnum_int = _MAP.get(portnum, portnum) if isinstance(portnum, str) else int(portnum)
+
+            event = None
+
+            if portnum_int == 1:  # TEXT_MESSAGE_APP
+                text = decoded.get("text", "")
+                if not text or not from_id:
+                    return
+                if text.startswith(">:"):
+                    caps = re.findall(r'\?(\w+)', text.split("|")[0])
+                    event = Event(type=EventType.HEARTBEAT, from_node=from_id,
+                                  payload=text, meta={"caps": caps})
+                else:
+                    event = Event(type=EventType.MESSAGE, ts=time.time(),
+                                  from_node=from_id,
+                                  to_node=self._node_str(packet.get("to")),
+                                  payload=text)
+
+            elif portnum_int == 4:  # NODEINFO_APP
+                user   = decoded.get("user", {})
+                handle = user.get("longName") or user.get("shortName") or ""
+                if from_id:
+                    event = Event(type=EventType.HEARTBEAT, from_node=from_id,
+                                  payload=handle or from_id,
+                                  meta={"handle": handle, "caps": []})
+
+            elif portnum_int == self.PORT_NEW_SECRET:
+                payload = decoded.get("payload", b"") or b""
+                if isinstance(payload, bytes) and len(payload) == 32 and self._new_secret_cb:
+                    if self._loop and not self._loop.is_closed():
+                        self._loop.call_soon_threadsafe(self._new_secret_cb, payload, from_id)
+                return
+
+            elif portnum_int == self.PORT_TOKEN:
+                payload = decoded.get("payload", b"") or b""
+                if isinstance(payload, bytes) and len(payload) == 225 and self._token_cb:
+                    if self._loop and not self._loop.is_closed():
+                        self._loop.call_soon_threadsafe(self._token_cb, payload, from_id)
+                return
+
+            elif portnum_int == self.PORT_SPEND_SIDECAR:
+                payload = decoded.get("payload", b"") or b""
+                if isinstance(payload, bytes) and len(payload) == 225 and self._spend_sidecar_cb:
+                    if self._loop and not self._loop.is_closed():
+                        self._loop.call_soon_threadsafe(self._spend_sidecar_cb, payload, from_id)
+                return
+
+            elif portnum_int == self.PORT_PUBKEY:
+                payload = decoded.get("payload", b"") or b""
+                if isinstance(payload, bytes) and len(payload) == 32 and from_id:
+                    event = Event(type=EventType.HEARTBEAT, from_node=from_id,
+                                  meta={"pubkey": payload.hex(), "caps": [], "silent": True})
+
+            if event and self._loop and not self._loop.is_closed():
+                self._loop.call_soon_threadsafe(self._eq.put_nowait, event)
+        except Exception as e:
+            log.debug(f"BLE receive error: {e}")
+
+    def _on_connection(self, interface, topic=None):
+        try:
+            my_info = getattr(interface, "myInfo", None)
+            if my_info and hasattr(my_info, "myNodeNum"):
+                self._node_id = self._node_str(my_info.myNodeNum)
+                self._cfg.node_id = self._node_id
+        except Exception:
+            pass
+        self._connected = True
+        device = self._cfg.ble.device_name or "auto"
+        self._emit(f"connected ✓  device={device}  node={self._node_id}")
+
+    def _on_lost(self, interface, topic=None):
+        self._connected = False
+        self._emit(f"connection lost — will retry in {RETRY_DELAY}s")
+
+    # ── Subscription management ───────────────────────────────────────────────
+
+    def _subscribe(self):
+        if self._subscribed:
+            return
+        try:
+            from pubsub import pub
+            pub.subscribe(self._on_receive,    "meshtastic.receive")
+            pub.subscribe(self._on_connection, "meshtastic.connection.established")
+            pub.subscribe(self._on_lost,       "meshtastic.connection.lost")
+            self._subscribed = True
+        except Exception as e:
+            log.warning(f"BLE pubsub subscribe error: {e}")
+
+    def _unsubscribe(self):
+        if not self._subscribed:
+            return
+        try:
+            from pubsub import pub
+            for fn, topic in [
+                (self._on_receive,    "meshtastic.receive"),
+                (self._on_connection, "meshtastic.connection.established"),
+                (self._on_lost,       "meshtastic.connection.lost"),
+            ]:
+                try:
+                    pub.unsubscribe(fn, topic)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._subscribed = False
+
+    # ── Main connect loop ─────────────────────────────────────────────────────
+
+    async def connect_loop(self):
+        """Background task: connect and auto-reconnect forever."""
+        self._loop = asyncio.get_event_loop()
+
+        try:
+            from pubsub import pub as _pub  # noqa: F401
+        except ImportError:
+            self._emit("pypubsub not found — run: pip install 'chiba-deck[ble]'")
+            return
+
+        while True:
+            try:
+                import meshtastic.ble_interface
+
+                device  = self._cfg.ble.device_name or None
+                adapter = self._cfg.ble.adapter or None
+
+                self._emit(
+                    f"scanning for {'device: ' + device if device else 'any Meshtastic BLE device'}..."
+                )
+
+                self._subscribe()
+
+                # BLEInterface constructor is synchronous-ish; run in thread to
+                # avoid blocking the asyncio event loop during BLE scan/connect.
+                kwargs = {"address": device}
+                if adapter:
+                    kwargs["adapter"] = adapter
+
+                self._iface = await self._loop.run_in_executor(
+                    None,
+                    lambda: meshtastic.ble_interface.BLEInterface(**kwargs),
+                )
+
+                # Poll until the connection drops
+                while self._connected:
+                    await asyncio.sleep(2)
+
+            except asyncio.CancelledError:
+                break
+            except ImportError:
+                self._emit("meshtastic not installed — run: pip install 'chiba-deck[ble]'")
+                await asyncio.sleep(60)
+                continue
+            except Exception as e:
+                self._emit(f"error: {e}  (retrying in {RETRY_DELAY}s)")
+
+            # Clean up before retry
+            self._unsubscribe()
+            self._connected = False
+            if self._iface:
+                try:
+                    self._iface.close()
+                except Exception:
+                    pass
+                self._iface = None
+            await asyncio.sleep(RETRY_DELAY)
+
+    # ── Send methods (same public API as MQTTTransport) ───────────────────────
+
+    def send_dm(self, to_node: str, text: str) -> bool:
+        if not self._connected or not self._iface:
+            log.debug(f"send_dm offline: {to_node}: {text[:60]}")
+            return False
+        try:
+            self._iface.sendText(text, destinationId=self._node_int(to_node),
+                                 wantAck=False, channelIndex=0)
+            return True
+        except Exception as e:
+            log.debug(f"BLE send_dm error: {e}")
+            return False
+
+    def send_broadcast(self, text: str):
+        if not self._connected or not self._iface:
+            return
+        try:
+            self._iface.sendText(text, channelIndex=0)
+        except Exception as e:
+            log.debug(f"BLE broadcast error: {e}")
+
+    def send_chiba_broadcast(self, payload: str):
+        if not self._connected or not self._iface:
+            return
+        try:
+            self._iface.sendText(payload, channelIndex=0)
+        except Exception as e:
+            log.debug(f"BLE chiba_broadcast error: {e}")
+
+    def send_pubkey_announce(self, pubkey_hex: str):
+        if not self._connected or not self._iface:
+            return
+        try:
+            self._iface.sendData(bytes.fromhex(pubkey_hex), destinationId="^all",
+                                 portNum=self.PORT_PUBKEY, wantAck=False)
+        except Exception as e:
+            log.debug(f"BLE pubkey_announce error: {e}")
+
+    def send_token(self, to_node: str, token_bytes: bytes) -> bool:
+        if not self._connected or not self._iface:
+            log.debug(f"send_token offline: {to_node}")
+            return False
+        try:
+            self._iface.sendData(token_bytes, destinationId=self._node_int(to_node),
+                                 portNum=self.PORT_TOKEN, wantAck=True)
+            return True
+        except Exception as e:
+            log.debug(f"BLE send_token error: {e}")
+            return False
+
+    def send_new_secret(self, to_node: str, new_secret_bytes: bytes) -> bool:
+        """Send a 32-byte new_secret sidecar (Port 255) to the token recipient."""
+        if not self._connected or not self._iface:
+            return False
+        try:
+            self._iface.sendData(new_secret_bytes, destinationId=self._node_int(to_node),
+                                 portNum=self.PORT_NEW_SECRET, wantAck=False)
+            return True
+        except Exception as e:
+            log.debug(f"BLE send_new_secret error: {e}")
+            return False
+
+    def send_spend_sidecar(self, to_node: str, spend_token_bytes: bytes) -> bool:
+        """Send the original 225-byte spend token as a re-spend sidecar (Port 257)."""
+        if not self._connected or not self._iface:
+            return False
+        try:
+            self._iface.sendData(spend_token_bytes, destinationId=self._node_int(to_node),
+                                 portNum=self.PORT_SPEND_SIDECAR, wantAck=False)
+            return True
+        except Exception as e:
+            log.debug(f"BLE send_spend_sidecar error: {e}")
+            return False
+
+    def can_reply_to(self, node_id: str, cooldown_s: int = 15) -> bool:
+        now = time.time()
+        if now - self._cooldowns.get(node_id, 0) >= cooldown_s:
+            self._cooldowns[node_id] = now
+            return True
+        return False
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    def disconnect(self):
+        self._unsubscribe()
+        if self._iface:
+            try:
+                self._iface.close()
+            except Exception:
+                pass

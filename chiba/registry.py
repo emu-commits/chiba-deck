@@ -26,6 +26,13 @@ class ServiceRegistry:
         for cap in caps:
             if cap in self._local:
                 continue
+            existing = self._remote.get(cap)
+            if existing and existing["node_id"] != node_id:
+                # First registration wins: a competing node cannot hijack a bound cap.
+                # The user must explicitly delete the binding (future: ?forget <cap>)
+                # before a new node can claim it.
+                log.debug(f"registry: ?{cap} already bound to {existing['node_id']}, ignoring claim from {node_id}")
+                continue
             self._remote[cap] = {"node_id": node_id, "last_seen": ts}
             self._db.register_remote_service(cap, node_id)
 
@@ -39,7 +46,8 @@ class ServiceRegistry:
         return None
 
     def local_caps(self) -> list[str]:
-        return list(self._local.keys())
+        """Commands advertised to the mesh — mesh-visible plugins only."""
+        return [cmd for cmd, p in self._local.items() if p.mesh_visible]
 
     def describe_all(self) -> list[dict]:
         result = []

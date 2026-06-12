@@ -9,7 +9,8 @@ mqtt:
 
 ble:
   enabled: false
-  device_name: ""
+  device_name: ""        # BLE device name or MAC address; leave empty to auto-scan
+  adapter: ""            # HCI adapter override, e.g. "hci0"; empty = system default
 
 mesh:
   cooldown_seconds: 15
@@ -18,14 +19,33 @@ mesh:
   reply_timeout_seconds: 30
 
 nlp:
-  confidence_threshold: 0.65
   embeddings_path: "embeddings/intent_matrix.npz"
 
 db:
   path: "chiba.db"
+
+# External plugins — each entry maps a ?cmd to a shell program.
+# chiba appends the query as the final positional arg and returns stdout as the DM reply.
+# No shell interpolation: query is passed as a literal argument (no injection risk).
+#
+# plugins:
+#   - cmd: wiki
+#     description: "search the wiki"
+#     exec: "python3 /home/pi/wiki-bot/query.py"
+#     timeout: 8         # optional, default 8s
+#     max_chars: 200     # optional, default 200 (fits a single mesh DM)
+#   - cmd: weather
+#     description: "local weather report"
+#     exec: "/home/pi/scripts/weather.sh"
 
 payments:
   enabled: false
   wallet_db: "wallet.db"
   mesh_cash_path: ""          # absolute path to mesh-cash repo root, e.g. /home/pi/mesh-cash
   rate_limit_per_min: 4       # max incoming token verifications per sender per minute
+  # Ethereum / Base — required for ?deposit and ?redeem
+  rpc_url: "https://base-sepolia-rpc.publicnode.com"
+  contract_address: "0x5ceE62435b801AB3ae0c5c48BE39639F18Ed5De0"   # Base Sepolia
+  usdc_address: "0x036CbD53842c5426634e7929541eC2318f3dCF7e"        # Base Sepolia test USDC
+  chain_id: 84532             # 84532 = Base Sepolia  |  8453 = Base mainnet
+  # private_key: ""           # set via ETH_PRIVATE_KEY env var instead

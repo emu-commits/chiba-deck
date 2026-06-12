@@ -17,6 +17,10 @@ class HeartbeatService:
         self._handle = node_handle
         self._pubkey = pubkey
 
+    def set_pubkey(self, pubkey: str):
+        """Update the payment pubkey (e.g. after payments are enabled live)."""
+        self._pubkey = pubkey
+
     def _payload(self) -> str:
         caps = self._registry.local_caps()
         caps_str = " ".join(f"?{c}" for c in caps)

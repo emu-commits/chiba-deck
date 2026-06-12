@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 
@@ -71,6 +72,9 @@ class Database:
     def __init__(self, path: str):
         self.path = path
         self._conn: sqlite3.Connection | None = None
+        # Plugin handlers run in worker threads (asyncio.to_thread) while the
+        # event loop also writes — serialize write transactions explicitly.
+        self._lock = threading.Lock()
 
     def connect(self):
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
@@ -79,6 +83,7 @@ class Database:
         self._conn.executescript(SCHEMA)
         self._migrate()
         self._conn.commit()
+        self.prune_old_data()
 
     def _migrate(self):
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(nodes)")}
@@ -87,27 +92,30 @@ class Database:
 
     @contextmanager
     def tx(self):
-        try:
-            yield self._conn
-            self._conn.commit()
-        except Exception:
-            self._conn.rollback()
-            raise
+        with self._lock:
+            try:
+                yield self._conn
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def upsert_node(self, node_id: str, handle: str = "", caps: list | None = None,
                     hops: int = 0, snr: float = 0.0):
-        caps_json = json.dumps(caps or [])
+        # caps=None means "no capability info in this packet" — preserve what we
+        # already know rather than wiping it (plain chat messages carry no caps).
+        caps_json = json.dumps(caps) if caps is not None else None
         with self.tx():
             self._conn.execute("""
                 INSERT INTO nodes (node_id, handle, caps_json, hops, snr, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, COALESCE(?, '[]'), ?, ?, ?)
                 ON CONFLICT(node_id) DO UPDATE SET
                     handle=CASE WHEN excluded.handle != '' THEN excluded.handle ELSE handle END,
-                    caps_json=excluded.caps_json,
+                    caps_json=COALESCE(?, caps_json),
                     hops=excluded.hops,
                     snr=excluded.snr,
                     last_seen=excluded.last_seen
-            """, (node_id, handle, caps_json, hops, snr, time.time()))
+            """, (node_id, handle, caps_json, hops, snr, time.time(), caps_json))
 
     def get_node_handle(self, node_id: str) -> str:
         row = self._conn.execute(
@@ -163,14 +171,17 @@ class Database:
         ).fetchone()[0]
 
     def register_remote_service(self, cmd: str, node_id: str, description: str = ""):
+        # Only update last_seen/description when the same node re-announces.
+        # A different node cannot overwrite an existing binding (first-claim-wins).
         with self.tx():
             self._conn.execute("""
                 INSERT INTO service_registry (cmd, node_id, description, last_seen)
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(cmd) DO UPDATE SET
-                    node_id=excluded.node_id,
-                    description=excluded.description,
-                    last_seen=excluded.last_seen
+                    description=CASE WHEN service_registry.node_id=excluded.node_id
+                                     THEN excluded.description ELSE service_registry.description END,
+                    last_seen=CASE WHEN service_registry.node_id=excluded.node_id
+                                   THEN excluded.last_seen ELSE service_registry.last_seen END
             """, (cmd, node_id, description, time.time()))
 
     def get_remote_services(self) -> list[dict]:
@@ -242,3 +253,12 @@ class Database:
                 "INSERT INTO events (type, from_id, payload, ts) VALUES (?, ?, ?, ?)",
                 (type_, from_id, payload, time.time())
             )
+
+    def prune_old_data(self, max_age_s: float = 7776000) -> None:
+        # Payments and wallet records are never pruned — they are financial history.
+        # Everything else is pruned after max_age_s (default 90 days).
+        cutoff = time.time() - max_age_s
+        with self.tx():
+            self._conn.execute("DELETE FROM messages WHERE ts < ?", (cutoff,))
+            self._conn.execute("DELETE FROM events WHERE ts < ?", (cutoff,))
+            self._conn.execute("DELETE FROM market_listings WHERE ts < ?", (cutoff,))

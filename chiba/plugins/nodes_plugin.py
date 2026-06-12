@@ -5,6 +5,7 @@ class NodesPlugin(Plugin):
     cmd = "nodes"
     description = "list online mesh nodes"
     local = True
+    mesh_visible = True
 
     def __init__(self):
         self._db = None

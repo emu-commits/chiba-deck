@@ -7,6 +7,7 @@ from textual.binding import Binding
 from textual.widgets import Input
 
 from ..events import EventQueue
+from ..payments.wallet import get_wallet
 from .config_screen import ConfigScreen
 from .status_bar import StatusBar
 from .stream_panel import StreamPanel
@@ -128,6 +129,12 @@ class ChibaApp(App):
             bar.node_count = self._db.get_node_count()
             bar.unread = self._db.get_unread_count()
             bar.connected = self._transport.connected if self._transport else False
+            w = get_wallet()
+            if w is not None:
+                total = sum(d * c for d, c in w.balance().items())
+                bar.balance = f"${total:.2f}"
+            else:
+                bar.balance = "off"
         except Exception:
             pass
 

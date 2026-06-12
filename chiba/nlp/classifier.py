@@ -13,7 +13,8 @@ class IntentClassifier:
         self._loaded = False
         self._labels: list[str] = []
         self._matrix: np.ndarray | None = None
-        self._vectorizer = None
+        self._vocab_index: dict[str, int] = {}
+        self._idf_weights: np.ndarray | None = None
         self._default_threshold = 0.40
 
     # TF-IDF cosine sims are naturally lower than GloVe — use a method-aware threshold
@@ -29,23 +30,28 @@ class IntentClassifier:
 
             vocab = list(data["vocab"])
             idf = data["idf"]
-            self._vectorizer = self._rebuild_vectorizer(vocab, idf)
+            self._rebuild_vectorizer(vocab, idf)
             self._loaded = True
             log.info(f"classifier loaded: {len(self._labels)} intents, dim={self._matrix.shape[1]}, method={method}")
         except Exception as e:
             log.error(f"classifier load failed: {e} — falling back to keyword match")
             self._loaded = False
 
-    def _rebuild_vectorizer(self, vocab: list[str], idf: np.ndarray):
-        from sklearn.feature_extraction.text import TfidfVectorizer
-
-        vocab_dict = {w: i for i, w in enumerate(vocab)}
-        vec = TfidfVectorizer(ngram_range=(1, 2), vocabulary=vocab_dict)
-        vec.idf_ = idf
-        return vec
+    def _rebuild_vectorizer(self, vocab: list[str], idf: np.ndarray) -> None:
+        # Pure-numpy TF-IDF — no sklearn dependency at runtime.
+        # Replicates TfidfVectorizer(ngram_range=(1,2)) transform + L2 norm.
+        self._vocab_index = {w: i for i, w in enumerate(vocab)}
+        self._idf_weights = idf.astype(np.float32)
 
     def _embed(self, text: str) -> np.ndarray:
-        v = self._vectorizer.transform([text]).toarray()[0]
+        tokens = re.findall(r'[a-z]+', text.lower())
+        ngrams = tokens + [f"{tokens[i]} {tokens[i+1]}" for i in range(len(tokens) - 1)]
+        tf = np.zeros(len(self._vocab_index), dtype=np.float32)
+        for ng in ngrams:
+            idx = self._vocab_index.get(ng)
+            if idx is not None:
+                tf[idx] += 1.0
+        v = tf * self._idf_weights
         norm = np.linalg.norm(v)
         return v / norm if norm > 0 else v
 
